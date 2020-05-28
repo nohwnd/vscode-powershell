@@ -80,6 +80,7 @@ if (!$pesterModule) {
 $pester4Output = switch ($Output) {
     "None" { "None" }
     "Minimal" { "Fails" }
+    "Normal" { "Fails" }
     default { "All" }
 }
 

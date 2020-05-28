@@ -828,6 +828,7 @@
             "FromPreference",
             "Minimal",
             "Normal",
+            "Detailed",
             "Diagnostic"
           ],
           "default": "FromPreference",
@@ -838,6 +839,7 @@
           "enum": [
             "Minimal",
             "Normal",
+            "Detailed",
             "Diagnostic"
           ],
           "default": "Diagnostic",
