@@ -22,4 +22,8 @@ Install-PSResource -Verbose -TrustRepository -RequiredResource  @{
         version = "0.14.2"
         repository = $PSRepository
     }
+    Pester = @{
+        version = "5.7.1"
+        repository = $PSRepository
+    }
 }
