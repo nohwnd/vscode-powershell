@@ -22,6 +22,10 @@ import { HelpCompletionFeature } from "./features/HelpCompletion";
 import { ISECompatibilityFeature } from "./features/ISECompatibility";
 import { LanguageModelToolsFeature } from "./features/LanguageModelTools";
 import { OpenInISEFeature } from "./features/OpenInISE";
+import {
+    createDefaultRunnerInvoker,
+    PesterTestController,
+} from "./features/PesterTestController";
 import { PesterTestsFeature } from "./features/PesterTests";
 import { RemoteFilesFeature } from "./features/RemoteFiles";
 import { ShowHelpFeature } from "./features/ShowHelp";
@@ -160,7 +164,6 @@ export async function activate(
         new PesterTestsFeature(sessionManager, logger),
         new CodeActionsFeature(logger),
         new SpecifyScriptArgsFeature(context),
-
         vscode.commands.registerCommand(
             "PowerShell.OpenLogFolder",
             async () => {
@@ -181,6 +184,26 @@ export async function activate(
         // Register a command that waits for the Extension Terminal to be active. Can be used by .NET Attach Tasks.
         registerWaitForPsesActivationCommand(context),
     ];
+
+    if (
+        vscode.workspace
+            .getConfiguration("powershell.pester")
+            .get<boolean>("useTestController", true) &&
+        PesterTestController.shouldRegister()
+    ) {
+        const powerShellExecutable =
+            sessionManager.PowerShellExeDetails?.exePath ?? "pwsh";
+        const invoker = createDefaultRunnerInvoker(
+            context,
+            powerShellExecutable,
+            logger,
+        );
+        commandRegistrations.push(new PesterTestController(invoker, logger));
+    } else if (!PesterTestController.shouldRegister()) {
+        logger.write(
+            "Skipping Pester Test Explorer registration because the 'pspester.pester-test' extension is installed.",
+        );
+    }
 
     const externalApi = new ExternalApiFeature(context, sessionManager, logger);
 
