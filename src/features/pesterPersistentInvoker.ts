@@ -29,6 +29,9 @@ interface ServeCommand {
     coveragePath?: string;
     coverageSourcePath?: string[];
     outputVerbosity?: RunOptions["outputVerbosity"];
+    pesterModulePath?: string;
+    workingDirectory?: string;
+    configurationPath?: string;
 }
 
 /**
@@ -67,11 +70,13 @@ export class PersistentPesterRunnerInvoker
         onEvent: (event: RunnerEvent) => void,
         token: vscode.CancellationToken,
     ): Promise<number> {
-        return this.sendCommand(
-            { op: "discover", requestId: "", path: opts.paths },
-            onEvent,
-            token,
-        );
+        const cmd: ServeCommand = {
+            op: "discover",
+            requestId: "",
+            path: opts.paths,
+        };
+        applyCommonOptions(cmd, opts);
+        return this.sendCommand(cmd, onEvent, token);
     }
 
     public async run(
@@ -97,6 +102,7 @@ export class PersistentPesterRunnerInvoker
                 cmd.coverageSourcePath = opts.coverage.sourcePaths;
             }
         }
+        applyCommonOptions(cmd, opts);
         return this.sendCommand(cmd, onEvent, token);
     }
 
@@ -381,5 +387,24 @@ export class PersistentPesterRunnerInvoker
             }
         }
         this.child = undefined;
+    }
+}
+
+function applyCommonOptions(
+    cmd: ServeCommand,
+    opts: {
+        pesterModulePath?: string;
+        workingDirectory?: string;
+        configurationPath?: string;
+    },
+): void {
+    if (opts.pesterModulePath !== undefined && opts.pesterModulePath !== "") {
+        cmd.pesterModulePath = opts.pesterModulePath;
+    }
+    if (opts.workingDirectory !== undefined && opts.workingDirectory !== "") {
+        cmd.workingDirectory = opts.workingDirectory;
+    }
+    if (opts.configurationPath !== undefined && opts.configurationPath !== "") {
+        cmd.configurationPath = opts.configurationPath;
     }
 }

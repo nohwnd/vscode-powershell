@@ -1157,6 +1157,31 @@
             ],
             "default": "Diagnostic",
             "markdownDescription": "Defines the verbosity of output to be used when debugging a test or a block. For Pester 5 and newer the default value `Diagnostic` will print additional information about discovery, skipped and filtered tests, mocking and more."
+          },
+          "powershell.pester.pesterModulePath": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Optional path (file or folder) to a specific Pester module to import before running tests through the Test Explorer. Useful when developing on Pester itself, or to pin a version different from whatever is auto-loaded. When empty, the runner falls back to whichever Pester `Import-Module` resolves by name."
+          },
+          "powershell.pester.workingDirectory": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Working directory to use when invoking Pester. Resolved relative to the workspace root. When empty, the runner uses the workspace folder containing the test file."
+          },
+          "powershell.pester.configurationPath": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Optional path to a `.psd1` Pester configuration file. When set, the runner loads it and merges the Test Explorer's overrides (file filters, line filters, code coverage path) on top of it. Resolved relative to the workspace root."
+          },
+          "powershell.pester.testFilePath": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "**/*.[tT]ests.[pP][sS]1"
+            ],
+            "markdownDescription": "Glob patterns (relative to each workspace folder) that identify Pester test files. Files matching any of these globs are surfaced in the Test Explorer."
           }
         }
       },
