@@ -188,8 +188,7 @@ export async function activate(
     if (
         vscode.workspace
             .getConfiguration("powershell.pester")
-            .get<boolean>("useTestController", true) &&
-        PesterTestController.shouldRegister()
+            .get<boolean>("useTestController", true)
     ) {
         const powerShellExecutable =
             sessionManager.PowerShellExeDetails?.exePath ?? "pwsh";
@@ -199,10 +198,6 @@ export async function activate(
             logger,
         );
         commandRegistrations.push(new PesterTestController(invoker, logger));
-    } else if (!PesterTestController.shouldRegister()) {
-        logger.write(
-            "Skipping Pester Test Explorer registration because the 'pspester.pester-test' extension is installed.",
-        );
     }
 
     const externalApi = new ExternalApiFeature(context, sessionManager, logger);
