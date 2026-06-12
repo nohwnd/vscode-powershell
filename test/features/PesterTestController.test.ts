@@ -5,6 +5,9 @@ import * as assert from "assert";
 import * as vscode from "vscode";
 import {
     buildItemTree,
+    collectFilterLines,
+    findDescendantById,
+    findDescendantsByLine,
     reportRunnerEvent,
 } from "../../src/features/PesterTestController";
 import type {
@@ -428,6 +431,237 @@ describe("PesterTestController helpers", function () {
             } finally {
                 ctx.controller.dispose();
             }
+        });
+    });
+
+    describe("collectFilterLines", function () {
+        let controller: vscode.TestController;
+
+        beforeEach(function () {
+            controller = vscode.tests.createTestController(
+                `pester-test-${Math.random()}`,
+                "Pester (test)",
+            );
+        });
+
+        afterEach(function () {
+            controller.dispose();
+        });
+
+        function makeItemWithLine(
+            id: string,
+            zeroBasedLine: number | undefined,
+        ): vscode.TestItem {
+            const item = controller.createTestItem(id, id);
+            if (zeroBasedLine !== undefined) {
+                item.range = new vscode.Range(
+                    zeroBasedLine,
+                    0,
+                    zeroBasedLine,
+                    0,
+                );
+            }
+            return item;
+        }
+
+        it("returns undefined when no items have a range", function () {
+            const items = [
+                makeItemWithLine("a", undefined),
+                makeItemWithLine("b", undefined),
+            ];
+            assert.strictEqual(collectFilterLines(items), undefined);
+        });
+
+        it("returns undefined for an empty input", function () {
+            assert.strictEqual(collectFilterLines([]), undefined);
+        });
+
+        it("converts 0-based line numbers to Pester's 1-based form", function () {
+            const items = [
+                makeItemWithLine("a", 0),
+                makeItemWithLine("b", 9),
+                makeItemWithLine("c", 41),
+            ];
+            assert.deepStrictEqual(
+                collectFilterLines(items)?.sort((a, b) => a - b),
+                [1, 10, 42],
+            );
+        });
+
+        it("de-duplicates ForEach iterations declared on the same line", function () {
+            const items = [
+                // All three TestItems share the same source-line `It` —
+                // typical of an `-ForEach @(...)` expansion.
+                makeItemWithLine("a", 5),
+                makeItemWithLine("b", 5),
+                makeItemWithLine("c", 5),
+                makeItemWithLine("d", 9),
+            ];
+            assert.deepStrictEqual(
+                collectFilterLines(items)?.sort((a, b) => a - b),
+                [6, 10],
+            );
+        });
+
+        it("ignores items without a range and keeps the rest", function () {
+            const items = [
+                makeItemWithLine("a", 4),
+                makeItemWithLine("missing", undefined),
+                makeItemWithLine("b", 11),
+            ];
+            assert.deepStrictEqual(
+                collectFilterLines(items)?.sort((a, b) => a - b),
+                [5, 12],
+            );
+        });
+    });
+
+    describe("findDescendantById", function () {
+        let controller: vscode.TestController;
+
+        beforeEach(function () {
+            controller = vscode.tests.createTestController(
+                `pester-test-${Math.random()}`,
+                "Pester (test)",
+            );
+        });
+
+        afterEach(function () {
+            controller.dispose();
+        });
+
+        function buildTree(): vscode.TestItem {
+            const file = controller.createTestItem("file", "Sample.Tests.ps1");
+            const describe = controller.createTestItem(
+                "file::Greeter",
+                "Greeter",
+            );
+            const context = controller.createTestItem(
+                "file::Greeter > with name",
+                "with name",
+            );
+            const it1 = controller.createTestItem(
+                "file::Greeter > with name > returns hello",
+                "returns hello",
+            );
+            const it2 = controller.createTestItem(
+                "file::Greeter > with name > is friendly",
+                "is friendly",
+            );
+            context.children.replace([it1, it2]);
+            describe.children.replace([context]);
+            file.children.replace([describe]);
+            controller.items.add(file);
+            return file;
+        }
+
+        it("finds a deeply nested descendant by exact id", function () {
+            const root = buildTree();
+            const hit = findDescendantById(
+                root,
+                "file::Greeter > with name > is friendly",
+            );
+            assert.ok(hit, "expected to find the It");
+            assert.strictEqual(hit.label, "is friendly");
+        });
+
+        it("does not return the root even when its id matches", function () {
+            const root = buildTree();
+            // root has id "file" — we only walk children, so this should miss.
+            assert.strictEqual(findDescendantById(root, "file"), undefined);
+        });
+
+        it("returns undefined when no descendant matches", function () {
+            const root = buildTree();
+            assert.strictEqual(
+                findDescendantById(root, "file::Nope > missing"),
+                undefined,
+            );
+        });
+    });
+
+    describe("findDescendantsByLine", function () {
+        let controller: vscode.TestController;
+
+        beforeEach(function () {
+            controller = vscode.tests.createTestController(
+                `pester-test-${Math.random()}`,
+                "Pester (test)",
+            );
+        });
+
+        afterEach(function () {
+            controller.dispose();
+        });
+
+        function makeRoot(): vscode.TestItem {
+            const root = controller.createTestItem("root", "root");
+            controller.items.add(root);
+            return root;
+        }
+
+        function makeItem(
+            id: string,
+            zeroBasedLine: number | undefined,
+        ): vscode.TestItem {
+            const item = controller.createTestItem(id, id);
+            if (zeroBasedLine !== undefined) {
+                item.range = new vscode.Range(
+                    zeroBasedLine,
+                    0,
+                    zeroBasedLine,
+                    0,
+                );
+            }
+            return item;
+        }
+
+        it("returns every descendant on the requested line", function () {
+            // Simulates a Pester `It -ForEach @(...)` expansion: one declaration
+            // line, multiple runtime cases.
+            const root = makeRoot();
+            const a = makeItem("greets <Name=Alice>", 4);
+            const b = makeItem("greets <Name=Bob>", 4);
+            const c = makeItem("plain", 8);
+            root.children.replace([a, b, c]);
+
+            const hits = findDescendantsByLine(root, 4);
+            const labels = hits.map((h) => h.label).sort();
+            assert.deepStrictEqual(labels, [
+                "greets <Name=Alice>",
+                "greets <Name=Bob>",
+            ]);
+        });
+
+        it("descends through nested blocks", function () {
+            const root = makeRoot();
+            const describe = makeItem("Greeter", 0);
+            const ctx = makeItem("ctx", 1);
+            const target = makeItem("inner", 7);
+            ctx.children.replace([target]);
+            describe.children.replace([ctx]);
+            root.children.replace([describe]);
+
+            const hits = findDescendantsByLine(root, 7);
+            assert.strictEqual(hits.length, 1);
+            assert.strictEqual(hits[0].label, "inner");
+        });
+
+        it("returns an empty array when no descendant has a matching line", function () {
+            const root = makeRoot();
+            root.children.replace([makeItem("a", 4), makeItem("b", undefined)]);
+            assert.deepStrictEqual(findDescendantsByLine(root, 99), []);
+        });
+
+        it("ignores descendants without a range", function () {
+            const root = makeRoot();
+            root.children.replace([
+                makeItem("with-range", 4),
+                makeItem("no-range", undefined),
+            ]);
+            const hits = findDescendantsByLine(root, 4);
+            assert.strictEqual(hits.length, 1);
+            assert.strictEqual(hits[0].label, "with-range");
         });
     });
 });

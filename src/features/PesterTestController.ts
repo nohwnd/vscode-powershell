@@ -859,9 +859,11 @@ function groupByFile(items: vscode.TestItem[]): Map<string, vscode.TestItem[]> {
  * Compute the de-duplicated 1-based source-line numbers for a set of test
  * items. Used to build Pester's `Filter.Line` when running a subset of a
  * file so we don't execute every test in the file just to satisfy one
- * click.
+ * click. Exported for unit-testing.
  */
-function collectFilterLines(items: vscode.TestItem[]): number[] | undefined {
+export function collectFilterLines(
+    items: vscode.TestItem[],
+): number[] | undefined {
     const lines = new Set<number>();
     for (const item of items) {
         if (item.range !== undefined) {
