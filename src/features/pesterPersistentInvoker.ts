@@ -60,7 +60,7 @@ export class PersistentPesterRunnerInvoker
     private disposed = false;
 
     constructor(
-        private readonly scriptPath: string,
+        public readonly scriptPath: string,
         private readonly powerShellExecutable: string,
         private readonly logger: ILogger,
     ) {}

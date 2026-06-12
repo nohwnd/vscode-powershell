@@ -956,19 +956,216 @@ export class PesterTestController implements vscode.Disposable {
         const run = this.controller.createTestRun(request);
         try {
             const tests = await this.collectRequestedTests(request);
+            for (const t of tests) {
+                run.enqueued(t);
+            }
+            const filesRunInFull = this.computeFilesRunInFull(request);
             const byFile = groupByFile(tests);
-            for (const [file] of byFile) {
+            for (const [file, items] of byFile) {
                 if (token.isCancellationRequested) {
                     break;
                 }
-                await vscode.commands.executeCommand(
-                    "PowerShell.RunPesterTests",
-                    vscode.Uri.file(file).toString(),
-                    true,
-                );
+                for (const t of items) {
+                    run.started(t);
+                }
+                const lineFilter = filesRunInFull.has(file)
+                    ? undefined
+                    : collectFilterLines(items);
+                try {
+                    await this.debugOneFile(
+                        file,
+                        items,
+                        run,
+                        token,
+                        lineFilter,
+                    );
+                } catch (err) {
+                    this.logger.writeError(
+                        `Pester debug session for ${file} failed: ${(err as Error).message}`,
+                    );
+                    for (const item of items) {
+                        run.errored(
+                            item,
+                            new vscode.TestMessage(
+                                `Debug session failed: ${(err as Error).message}`,
+                            ),
+                        );
+                    }
+                }
             }
+        } catch (err) {
+            this.logger.writeError(
+                `PesterTestController debug failed: ${(err as Error).message}`,
+            );
         } finally {
             run.end();
+        }
+    }
+
+    /**
+     * Run a single file under the PSES debug adapter, capturing structured
+     * runner events via the script's `-EventLog` side channel so we can feed
+     * pass/fail/diff information back into the {@link vscode.TestRun}. The
+     * regular Run profile streams events live via stdout, but stdout under
+     * the debug adapter is owned by the PSES debug REPL — hence the sidecar
+     * file.
+     *
+     * Events are parsed and applied after the debug session terminates.
+     */
+    private async debugOneFile(
+        file: string,
+        items: vscode.TestItem[],
+        run: vscode.TestRun,
+        token: vscode.CancellationToken,
+        lineNumbers: number[] | undefined,
+    ): Promise<void> {
+        const fileUri = vscode.Uri.file(file);
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+        const eventLogPath = path.join(
+            os.tmpdir(),
+            `pester-events-${Date.now()}-${Math.random()
+                .toString(36)
+                .slice(2)}.jsonl`,
+        );
+
+        const scriptPath = this.invoker.scriptPath;
+        const settings = this.getRunnerSettings(file);
+        const sessionName = `Pester Debug: ${path.basename(file)}`;
+        const args = ["-Run", "-Path", psQuote(file)];
+        if (lineNumbers && lineNumbers.length > 0) {
+            args.push("-LineNumber");
+            args.push(lineNumbers.join(","));
+        }
+        if (settings.workingDirectory) {
+            args.push("-WorkingDirectory", psQuote(settings.workingDirectory));
+        }
+        if (settings.pesterModulePath) {
+            args.push("-PesterModulePath", psQuote(settings.pesterModulePath));
+        }
+        if (settings.configurationPath) {
+            args.push(
+                "-ConfigurationPath",
+                psQuote(settings.configurationPath),
+            );
+        }
+        args.push("-EventLog", psQuote(eventLogPath));
+
+        const launchConfig: vscode.DebugConfiguration = {
+            request: "launch",
+            type: "PowerShell",
+            name: sessionName,
+            script: scriptPath,
+            args,
+            internalConsoleOptions: "neverOpen",
+            createTemporaryIntegratedConsole: true,
+            cwd: settings.workingDirectory ?? path.dirname(file),
+        };
+
+        // Track the matching session so we can wait for its termination
+        // before tailing the event log. Names are unique because we include
+        // a timestamp via path.basename + the per-run sidecar path.
+        let resolvedSession: vscode.DebugSession | undefined;
+        const sessionStarted = new Promise<vscode.DebugSession>((resolve) => {
+            const sub = vscode.debug.onDidStartDebugSession((s) => {
+                if (s.name === sessionName) {
+                    sub.dispose();
+                    resolvedSession = s;
+                    resolve(s);
+                }
+            });
+            this.disposables.push(sub);
+        });
+
+        const ok = await vscode.debug.startDebugging(
+            workspaceFolder,
+            launchConfig,
+        );
+        if (!ok) {
+            throw new Error(
+                "vscode.debug.startDebugging returned false. PSES debug adapter may be unavailable.",
+            );
+        }
+
+        const session = await sessionStarted;
+        const sessionEnded = new Promise<void>((resolve) => {
+            const sub = vscode.debug.onDidTerminateDebugSession((s) => {
+                if (s.id === session.id) {
+                    sub.dispose();
+                    resolve();
+                }
+            });
+            this.disposables.push(sub);
+            if (token.isCancellationRequested && resolvedSession) {
+                void vscode.debug.stopDebugging(resolvedSession);
+            }
+        });
+
+        const cancelSub = token.onCancellationRequested(() => {
+            if (resolvedSession) {
+                void vscode.debug.stopDebugging(resolvedSession);
+            }
+        });
+
+        try {
+            await sessionEnded;
+        } finally {
+            cancelSub.dispose();
+        }
+
+        await this.consumeEventLog(eventLogPath, items, run);
+    }
+
+    /**
+     * Read the sidecar event log written by `PesterRunner.ps1 -EventLog`,
+     * parse each JSON line, and feed every event through {@link applyEvent}
+     * exactly as the live runner protocol would. Marks any requested item
+     * that did not appear in the log as skipped.
+     */
+    private async consumeEventLog(
+        logPath: string,
+        items: vscode.TestItem[],
+        run: vscode.TestRun,
+    ): Promise<void> {
+        let raw: string;
+        try {
+            raw = await fs.readFile(logPath, "utf8");
+        } catch (err) {
+            this.logger.writeWarning(
+                `Pester debug event log missing at ${logPath}: ${(err as Error).message}`,
+            );
+            for (const item of items) {
+                run.skipped(item);
+            }
+            return;
+        }
+        const itemsById = new Map(items.map((i) => [i.id, i]));
+        const results = new Map<string, ResultEvent>();
+        for (const line of raw.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (trimmed.length === 0) {
+                continue;
+            }
+            let event: RunnerEvent;
+            try {
+                event = JSON.parse(trimmed) as RunnerEvent;
+            } catch (err) {
+                this.logger.writeWarning(
+                    `Skipping non-JSON line in Pester debug event log: ${trimmed} (${(err as Error).message})`,
+                );
+                continue;
+            }
+            this.applyEvent(event, run, itemsById, results);
+        }
+        for (const item of items) {
+            if (!results.has(item.id)) {
+                run.skipped(item);
+            }
+        }
+        try {
+            await fs.unlink(logPath);
+        } catch {
+            // Best-effort cleanup. Leaving a stale jsonl in %TEMP% is not
+            // worth surfacing to the user.
         }
     }
 }
@@ -1006,6 +1203,16 @@ export function createDefaultRunnerInvoker(
         powerShellExecutable,
         logger,
     );
+}
+
+/**
+ * Quote a string for use as a single argument in a PSES PowerShell debug
+ * launch config's `args` array. Each entry is parsed as PowerShell code, so
+ * paths containing spaces, hyphens, or other shell-meaningful characters
+ * must be wrapped in single quotes with any internal `'` escaped as `''`.
+ */
+function psQuote(value: string): string {
+    return `'${value.replace(/'/g, "''")}'`;
 }
 
 function groupByFile(items: vscode.TestItem[]): Map<string, vscode.TestItem[]> {

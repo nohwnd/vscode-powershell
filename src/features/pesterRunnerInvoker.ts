@@ -135,6 +135,8 @@ export function appendCommonOptionArgs(
  * this with a fake implementation that emits canned events.
  */
 export interface IPesterRunnerInvoker {
+    readonly scriptPath: string;
+
     discover(
         opts: DiscoverOptions,
         onEvent: (event: RunnerEvent) => void,
@@ -155,7 +157,7 @@ export interface IPesterRunnerInvoker {
  */
 export class ChildProcessPesterRunnerInvoker implements IPesterRunnerInvoker {
     constructor(
-        private readonly scriptPath: string,
+        public readonly scriptPath: string,
         private readonly powerShellExecutable: string,
         private readonly logger: ILogger,
     ) {}

@@ -69,7 +69,16 @@ param(
 
     [Parameter(ParameterSetName = 'Discover')]
     [Parameter(ParameterSetName = 'Run')]
-    [string]$ConfigurationPath
+    [string]$ConfigurationPath,
+
+    # Optional side channel: when set, every JSON event emitted to stdout is
+    # also appended (as one line per event) to this file. Used by the
+    # TestController's Debug profile, which spawns this script under the PSES
+    # debug adapter — stdout is hijacked by the debug REPL there, so the
+    # extension tails this file to recover structured results.
+    [Parameter(ParameterSetName = 'Discover')]
+    [Parameter(ParameterSetName = 'Run')]
+    [string]$EventLog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,6 +105,27 @@ function Write-JsonLine {
     # -Depth 8 covers Describe > Context > Context > It with extra room.
     $json = $Payload | ConvertTo-Json -Depth 8 -Compress
     [Console]::Out.WriteLine($json)
+    if ($script:EventLogPath) {
+        # Best-effort sidecar log so the TestController's Debug profile can
+        # recover structured events when stdout is owned by the PSES debug
+        # adapter. Use a stream with shared read so the extension can tail.
+        try {
+            $stream = [System.IO.File]::Open($script:EventLogPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+            try {
+                $writer = New-Object System.IO.StreamWriter($stream, [System.Text.Encoding]::UTF8)
+                try {
+                    $writer.WriteLine($json)
+                    $writer.Flush()
+                }
+                finally { $writer.Dispose() }
+            }
+            finally { $stream.Dispose() }
+        }
+        catch {
+            # Sidecar logging must never crash the runner. Drop and continue.
+            [Console]::Error.WriteLine("EventLog write failed: $($_.Exception.Message)")
+        }
+    }
 }
 
 # Convert a ConsoleColor to an ANSI SGR escape sequence so VS Code's test-output
@@ -644,8 +674,26 @@ function Invoke-RunnerRun {
 
 # Main ------------------------------------------------------------------------
 
-$script:PesterModule = Get-CompatiblePester -ModulePath $PesterModulePath
 $script:CurrentRequestId = $null
+# Set BEFORE Get-CompatiblePester so any pre-Pester error events are captured.
+$script:EventLogPath = if ($EventLog) { $EventLog } else { $null }
+if ($script:EventLogPath) {
+    try {
+        $dir = [System.IO.Path]::GetDirectoryName($script:EventLogPath)
+        if ($dir -and -not [System.IO.Directory]::Exists($dir)) {
+            [System.IO.Directory]::CreateDirectory($dir) | Out-Null
+        }
+        # Truncate any existing file and ensure it exists for Write-JsonLine
+        # to append to. UTF-8 without BOM matches what the TS side parses.
+        [System.IO.File]::WriteAllText($script:EventLogPath, '', [System.Text.UTF8Encoding]::new($false))
+    }
+    catch {
+        [Console]::Error.WriteLine("EventLog init failed: $($_.Exception.Message)")
+        $script:EventLogPath = $null
+    }
+}
+
+$script:PesterModule = Get-CompatiblePester -ModulePath $PesterModulePath
 
 if ($WorkingDirectory) {
     if (-not (Test-Path -LiteralPath $WorkingDirectory)) {
