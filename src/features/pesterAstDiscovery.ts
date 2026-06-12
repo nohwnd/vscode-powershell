@@ -53,7 +53,7 @@ const PESTER_BLOCK_REGEX = /^(Describe|Context|It)\b/i;
  */
 export function extractPesterBlockName(
     symbolName: string,
-): { keyword: "Describe" | "Context" | "It"; name: string } | undefined {
+): { keyword: "Describe" | "Context" | "It"; name: string; tags?: string[] } | undefined {
     const trimmed = symbolName.trim();
     const keywordMatch = /^(Describe|Context|It)\b/i.exec(trimmed);
     if (keywordMatch === null) {
@@ -75,11 +75,31 @@ export function extractPesterBlockName(
     if (rest.length === 0) {
         return undefined;
     }
+    // Pull tags out of the parameter list before we consume the name; the
+    // `-Tag` parameter can appear before OR after `-Name`, and either before
+    // or after the positional name, so a free-form scan is the simplest
+    // robust approach. Splice the matched range out of `rest` so the
+    // downstream name parser doesn't treat `-Tag` as a bareword name.
+    const tagScan = scanTagParameter(rest);
+    if (tagScan !== undefined) {
+        rest = (rest.substring(0, tagScan.start) +
+            " " +
+            rest.substring(tagScan.end)).trim();
+        if (rest.length === 0) {
+            return undefined;
+        }
+    }
+    const tags = tagScan?.tags ?? [];
     // Skip a leading `-Name ` parameter, including its short form.
     const nameParam = /^-Name\s+/i.exec(rest);
     if (nameParam !== null) {
         rest = rest.substring(nameParam[0].length);
     }
+    const result = (name: string): { keyword: "Describe" | "Context" | "It"; name: string; tags?: string[] } => {
+        return tags.length > 0
+            ? { keyword: normalised, name, tags }
+            : { keyword: normalised, name };
+    };
     // Quoted: capture between matching quotes, allowing PowerShell's `''` and
     // `""` escape sequences inside (we only consume up to the closing quote
     // that isn't doubled).
@@ -95,7 +115,7 @@ export function extractPesterBlockName(
                     i += 2;
                     continue;
                 }
-                return { keyword: normalised, name: value };
+                return result(value);
             }
             value += ch;
             i++;
@@ -108,7 +128,120 @@ export function extractPesterBlockName(
     if (bareword === null) {
         return undefined;
     }
-    return { keyword: normalised, name: bareword[1] };
+    return result(bareword[1]);
+}
+
+/**
+ * Scan a single line of Pester-block parameter text for `-Tag` / `-Tags`
+ * values. Handles the common syntaxes:
+ *   `-Tag 'slow'`, `-Tag 'a','b'`, `-Tag @('a', 'b')`, `-Tag slow,fast`,
+ *   `-Tags 'foo'` (Pester accepts the plural alias).
+ * Returns an empty array when no `-Tag` parameter is present. Intentionally
+ * forgiving: unrecognised constructs collapse to an empty result rather than
+ * raising, since this powers a cosmetic gutter feature.
+ */
+export function extractTagsFromLine(line: string): string[] {
+    return scanTagParameter(line)?.tags ?? [];
+}
+
+/**
+ * Locate the `-Tag` / `-Tags` parameter in `line` and return both the parsed
+ * tag values AND the substring range the parameter (with its values)
+ * occupies. Callers can splice that range out before further parsing so
+ * `-Tag 'slow'` doesn't bleed into the positional name argument.
+ */
+function scanTagParameter(line: string): { tags: string[]; start: number; end: number } | undefined {
+    const tagMatch = /(?:^|\s)-Tags?\b\s*/i.exec(line);
+    if (tagMatch === null) {
+        return undefined;
+    }
+    // Anchor `start` at the `-` so the splice removes the whole switch.
+    const start = tagMatch.index + (tagMatch[0].startsWith(" ") ? 1 : 0);
+    let i = tagMatch.index + tagMatch[0].length;
+    const len = line.length;
+    if (i >= len) {
+        return { tags: [], start, end: len };
+    }
+    // Step over a leading `@(` if present and remember to consume its `)`.
+    let expectClosingParen = false;
+    if (line.charAt(i) === "@" && line.charAt(i + 1) === "(") {
+        i += 2;
+        expectClosingParen = true;
+    }
+    const tags: string[] = [];
+    while (i < len) {
+        // Skip whitespace and separators.
+        while (i < len && /[\s,]/.test(line.charAt(i))) {
+            i++;
+        }
+        if (i >= len) break;
+        const ch = line.charAt(i);
+        if (ch === ")") {
+            i++;
+            expectClosingParen = false;
+            break;
+        }
+        // Another parameter (e.g. `-ForEach`, `-Name`) ends the tag list.
+        if (ch === "-" && i + 1 < len && /[A-Za-z]/.test(line.charAt(i + 1))) {
+            break;
+        }
+        // `{` would start a scriptblock body — definitely past the params.
+        if (ch === "{") {
+            break;
+        }
+        if (ch === "'" || ch === '"') {
+            const quote = ch;
+            i++;
+            let value = "";
+            while (i < len) {
+                const c = line.charAt(i);
+                if (c === quote) {
+                    if (line.charAt(i + 1) === quote) {
+                        value += c;
+                        i += 2;
+                        continue;
+                    }
+                    i++;
+                    break;
+                }
+                value += c;
+                i++;
+            }
+            if (value.length > 0) {
+                tags.push(value);
+            }
+            continue;
+        }
+        // Bareword: a contiguous run of non-whitespace, non-separator chars.
+        const wordStart = i;
+        while (i < len && !/[\s,)]/.test(line.charAt(i))) {
+            i++;
+        }
+        const value = line.substring(wordStart, i);
+        if (value.length > 0 && !value.startsWith("$") && !value.startsWith("@")) {
+            tags.push(value);
+        }
+    }
+    if (expectClosingParen) {
+        // We never saw the matching `)` — scan ahead to find it so the splice
+        // doesn't leave it dangling. Stop at `{` to be safe.
+        while (i < len && line.charAt(i) !== ")" && line.charAt(i) !== "{") {
+            i++;
+        }
+        if (i < len && line.charAt(i) === ")") {
+            i++;
+        }
+    }
+    // De-duplicate while preserving order.
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const t of tags) {
+        if (!seen.has(t)) {
+            seen.add(t);
+            unique.push(t);
+        }
+    }
+    return { tags: unique, start, end: i };
 }
 
 /**
@@ -226,6 +359,9 @@ export function extractPesterBlocksFromSymbols(
             line: sym.range.start.line + 1,
             children: [],
         };
+        if (parsed.tags && parsed.tags.length > 0) {
+            node.tags = parsed.tags;
+        }
         if (stack.length === 0) {
             roots.push(node);
         } else {
@@ -362,6 +498,7 @@ export function extractPesterBlocksFromText(
                 // N tests at runtime; surface them as blocks so the user gets
                 // a chevron and the runner can fill in the real cases.
                 const hasForEach = FOREACH_LINE_REGEX.test(line);
+                const tags = extractTagsFromLine(line);
                 const node: PesterTestNode = {
                     id,
                     label: name,
@@ -370,6 +507,9 @@ export function extractPesterBlocksFromText(
                     line: lineNo + 1,
                     children: [],
                 };
+                if (tags.length > 0) {
+                    node.tags = tags;
+                }
                 if (stack.length === 0) {
                     roots.push(node);
                 } else {

@@ -469,6 +469,25 @@ export class PesterTestController implements vscode.Disposable {
     ): Promise<void> {
         const run = this.controller.createTestRun(request);
         try {
+            // Log the shape of the request so we can answer "why did this
+            // run scope X instead of Y" without instrumenting the user's VS
+            // Code session. `request.include === undefined` is VS Code's
+            // signal that the visual tag filter, if any, has been ignored
+            // (its top-level Run All button intentionally bypasses filters).
+            const includeSummary =
+                request.include === undefined
+                    ? "(undefined — VS Code is asking us to run everything)"
+                    : request.include.length === 0
+                      ? "[]"
+                      : `[${request.include.map((i) => i.id).join(", ")}]`;
+            const excludeSummary =
+                request.exclude === undefined
+                    ? "(undefined)"
+                    : `[${request.exclude.map((i) => i.id).join(", ")}]`;
+            this.logger.write(
+                `PesterTestController runOnce: include=${includeSummary} exclude=${excludeSummary} coverage=${coverage}`,
+            );
+
             const tests = await this.collectRequestedTests(request);
             for (const t of tests) {
                 run.enqueued(t);

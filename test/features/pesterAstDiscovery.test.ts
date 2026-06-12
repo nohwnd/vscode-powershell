@@ -97,6 +97,56 @@ describe("extractPesterBlockName", function () {
     it("returns undefined when there's no name argument", function () {
         assert.strictEqual(extractPesterBlockName("Describe"), undefined);
     });
+
+    it("extracts a single -Tag value", function () {
+        assert.deepStrictEqual(
+            extractPesterBlockName("It 'is slow' -Tag 'slow'"),
+            { keyword: "It", name: "is slow", tags: ["slow"] },
+        );
+    });
+
+    it("extracts a single bareword -Tag value", function () {
+        assert.deepStrictEqual(
+            extractPesterBlockName("It 'is slow' -Tag slow"),
+            { keyword: "It", name: "is slow", tags: ["slow"] },
+        );
+    });
+
+    it("extracts multiple comma-separated -Tag values", function () {
+        assert.deepStrictEqual(
+            extractPesterBlockName(
+                "It 'multi-tag' -Tag 'integration', 'slow', fast",
+            ),
+            { keyword: "It", name: "multi-tag", tags: ["integration", "slow", "fast"] },
+        );
+    });
+
+    it("extracts -Tag @(...) array form", function () {
+        assert.deepStrictEqual(
+            extractPesterBlockName("It 'arr' -Tag @('a', 'b')"),
+            { keyword: "It", name: "arr", tags: ["a", "b"] },
+        );
+    });
+
+    it("accepts the -Tags plural alias", function () {
+        assert.deepStrictEqual(
+            extractPesterBlockName("Context 'ctx' -Tags 'foo'"),
+            { keyword: "Context", name: "ctx", tags: ["foo"] },
+        );
+    });
+
+    it("works when -Tag comes before -Name", function () {
+        assert.deepStrictEqual(
+            extractPesterBlockName("It -Tag 'slow' -Name 'order shuffled'"),
+            { keyword: "It", name: "order shuffled", tags: ["slow"] },
+        );
+    });
+
+    it("omits the tags key when no tags are present", function () {
+        const result = extractPesterBlockName("It 'plain'");
+        assert.deepStrictEqual(result, { keyword: "It", name: "plain" });
+        assert.strictEqual(result?.tags, undefined);
+    });
 });
 
 describe("extractPesterBlocksFromSymbols", function () {
@@ -349,5 +399,28 @@ describe("extractPesterBlocksFromText", function () {
         ].join("\n");
         const tree = extractPesterBlocksFromText(text, file);
         assert.strictEqual(tree[0].children[0].kind, "block");
+    });
+
+    it("propagates -Tag values to the node so the Test Explorer filter works without runner discovery", function () {
+        const text = [
+            "Describe 'X' {",
+            "    Context 'tagged tests' {",
+            "        It 'is slow' -Tag 'slow' {",
+            "            $true | Should -BeTrue",
+            "        }",
+            "        It 'is an integration test' -Tag 'integration', 'slow' {",
+            "            $true | Should -BeTrue",
+            "        }",
+            "        It 'is untagged' {",
+            "            $true | Should -BeTrue",
+            "        }",
+            "    }",
+            "}",
+        ].join("\n");
+        const tree = extractPesterBlocksFromText(text, file);
+        const ctx = tree[0].children[0];
+        assert.deepStrictEqual(ctx.children[0].tags, ["slow"]);
+        assert.deepStrictEqual(ctx.children[1].tags, ["integration", "slow"]);
+        assert.strictEqual(ctx.children[2].tags, undefined);
     });
 });

@@ -267,6 +267,61 @@ function Get-BaseConfiguration {
     return New-PesterConfiguration -Hashtable $data
 }
 
+function Format-PesterConfig {
+    # Dumps the Pester configuration sections that THIS runner sets, plus the
+    # full Filter.* block so users can verify in VS Code's test output panel
+    # exactly what got passed to Pester. Kept narrow on purpose: Pester ships
+    # with ~70 config fields and most of them are noise for our use case.
+    param(
+        [Parameter(Mandatory)]$Configuration,
+        [Parameter(Mandatory)][string]$Phase
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("Pester configuration ($Phase):") | Out-Null
+
+    # Fields this runner explicitly sets (always shown so users can see what
+    # the runner committed to) + filter fields (always shown so the
+    # "wait, why did it run that test?" question is answerable at a glance).
+    $sections = @(
+        @{ Name = 'Run';          Fields = @('Path', 'PassThru', 'SkipRun') }
+        @{ Name = 'Filter';       Fields = @('Tag', 'ExcludeTag', 'Line', 'ExcludeLine', 'FullName') }
+        @{ Name = 'CodeCoverage'; Fields = @('Enabled', 'OutputFormat', 'OutputPath', 'Path') }
+        @{ Name = 'Output';       Fields = @('Verbosity') }
+    )
+
+    foreach ($section in $sections) {
+        $sectionName = $section.Name
+        $sectionObj = $Configuration.$sectionName
+        if ($null -eq $sectionObj) { continue }
+        foreach ($field in $section.Fields) {
+            $propObj = $sectionObj.$field
+            if ($null -eq $propObj) { continue }
+            if (-not $propObj.PSObject.Properties['Value']) { continue }
+            $value = $propObj.Value
+            $lines.Add("  $sectionName.$field = $(Format-ConfigValue -Value $value)") | Out-Null
+        }
+    }
+
+    return ($lines -join "`r`n") + "`r`n"
+}
+
+function Format-ConfigValue {
+    param($Value)
+    if ($null -eq $Value) { return '$null' }
+    if ($Value -is [string]) { return "'$Value'" }
+    if ($Value -is [bool]) { return ([string]$Value) }
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        $items = @()
+        foreach ($i in $Value) {
+            if ($i -is [string]) { $items += "'$i'" } else { $items += [string]$i }
+        }
+        if ($items.Count -eq 0) { return '@()' }
+        return '@(' + ($items -join ', ') + ')'
+    }
+    return [string]$Value
+}
+
 function Get-TestId {
     param(
         [Parameter(Mandatory)][string]$File,
@@ -591,6 +646,8 @@ function Invoke-RunnerDiscover {
     # events so it shows in VS Code's logs instead of corrupting the protocol.
     $cfg.Output.Verbosity = 'None'
 
+    Write-JsonLine @{ type = 'output'; text = (Format-PesterConfig -Configuration $cfg -Phase 'Discover') }
+
     $script:__discoverResult = $null
     Invoke-Pester -Configuration $cfg *>&1 6>&1 2>&1 | ForEach-Object {
         if ($null -ne $_ -and $_.PSObject.Properties['Containers'] -and -not ($_ -is [System.Management.Automation.InformationRecord]) -and -not ($_ -is [System.Management.Automation.ErrorRecord])) {
@@ -654,6 +711,7 @@ function Invoke-RunnerRun {
 
     $script:__runResult = $null
     $script:__hadRunObject = $false
+    Write-JsonLine @{ type = 'output'; text = (Format-PesterConfig -Configuration $cfg -Phase 'Run') }
     Invoke-Pester -Configuration $cfg *>&1 6>&1 2>&1 | ForEach-Object {
         if ($null -ne $_ -and $_.PSObject.Properties['Containers'] -and -not ($_ -is [System.Management.Automation.InformationRecord]) -and -not ($_ -is [System.Management.Automation.ErrorRecord])) {
             $script:__runResult = $_
