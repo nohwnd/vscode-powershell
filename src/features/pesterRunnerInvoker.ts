@@ -48,6 +48,12 @@ export interface ResultEvent {
     status: "passed" | "failed" | "skipped" | "errored";
     durationMs: number;
     errors?: ResultError[];
+    /**
+     * Pester's `Set-ItResult -Skipped -Because '<reason>'` text (or any
+     * other skip reason it surfaces). The controller may surface this in
+     * the Test Output panel unless the user has hidden it.
+     */
+    skipMessage?: string;
 }
 export interface EndEvent {
     type: "end";

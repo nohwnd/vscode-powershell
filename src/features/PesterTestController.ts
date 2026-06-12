@@ -525,8 +525,27 @@ export class PesterTestController implements vscode.Disposable {
         const watcher = vscode.workspace.createFileSystemWatcher(
             this.getTestFileGlob(),
         );
+        const config = vscode.workspace.getConfiguration("powershell.pester");
+        const debounceMs = Math.max(
+            0,
+            config.get<number>("testChangeTimeout", 250),
+        );
+        // `autoDebugOnSave` only applies to the Run profile — Debug already
+        // debugs, Coverage already produces coverage; switching either is
+        // surprising. Coverage runs reach this method with `coverage=true`,
+        // and the Debug profile has its own dispatcher that doesn't reach
+        // here at all.
+        const autoDebug =
+            !coverage && config.get<boolean>("autoDebugOnSave", false);
+
         let pending: NodeJS.Timeout | undefined;
         let inFlight: Promise<void> | undefined;
+        const rerun = (): Promise<void> => {
+            if (autoDebug) {
+                return this.debug(request, token);
+            }
+            return this.runOnce(request, token, coverage);
+        };
         const trigger = (): void => {
             if (token.isCancellationRequested) {
                 return;
@@ -543,14 +562,14 @@ export class PesterTestController implements vscode.Disposable {
                         if (token.isCancellationRequested) {
                             return;
                         }
-                        return this.runOnce(request, token, coverage);
+                        return rerun();
                     })
                     .catch((err: unknown) => {
                         this.logger.writeError(
                             `Pester continuous run failed: ${(err as Error).message}`,
                         );
                     });
-            }, 250);
+            }, debounceMs);
         };
         const disposables: vscode.Disposable[] = [
             watcher,
@@ -559,7 +578,9 @@ export class PesterTestController implements vscode.Disposable {
             watcher.onDidDelete(trigger),
         ];
         // First run immediately so the user sees results without having to
-        // touch a file.
+        // touch a file. The initial pass is always a plain run even with
+        // autoDebugOnSave — otherwise activating continuous would launch
+        // the debugger before the user has changed anything.
         await this.runOnce(request, token, coverage);
         await new Promise<void>((resolve) => {
             const cancelSub = token.onCancellationRequested(() => {
@@ -725,7 +746,12 @@ export class PesterTestController implements vscode.Disposable {
         if (event.type === "error") {
             this.logger.writeError(`Pester runner error: ${event.message}`);
         }
-        reportRunnerEvent(event, run, itemsById, results);
+        const hide = vscode.workspace
+            .getConfiguration("powershell.pester")
+            .get<boolean>("hideSkippedBecauseMessages", false);
+        reportRunnerEvent(event, run, itemsById, results, {
+            hideSkippedBecauseMessages: hide,
+        });
     }
 
     private async attachCoverage(
@@ -1151,12 +1177,17 @@ function buildFailureMessages(event: ResultEvent): vscode.TestMessage[] {
  *
  * `results` records every result we've seen so the caller can detect tests
  * that finished without any event (and mark them `skipped` afterwards).
+ *
+ * `hideSkippedBecauseMessages` lets the caller suppress the per-test skip
+ * reason that Pester surfaces (e.g. `because <reason>` from
+ * `Set-ItResult -Skipped -Because`).
  */
 export function reportRunnerEvent(
     event: RunnerEvent,
     run: vscode.TestRun,
     itemsById: ReadonlyMap<string, vscode.TestItem>,
     results: Map<string, ResultEvent>,
+    options: { hideSkippedBecauseMessages?: boolean } = {},
 ): void {
     if (event.type === "output") {
         // VS Code's test-output panel renders ANSI escape codes when the
@@ -1196,6 +1227,17 @@ export function reportRunnerEvent(
             break;
         }
         case "skipped":
+            if (
+                event.skipMessage !== undefined &&
+                event.skipMessage !== "" &&
+                options.hideSkippedBecauseMessages !== true
+            ) {
+                run.appendOutput(
+                    `Skipped: ${event.skipMessage}\r\n`,
+                    undefined,
+                    target,
+                );
+            }
             run.skipped(target);
             break;
     }

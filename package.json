@@ -1182,6 +1182,22 @@
               "**/*.[tT]ests.[pP][sS]1"
             ],
             "markdownDescription": "Glob patterns (relative to each workspace folder) that identify Pester test files. Files matching any of these globs are surfaced in the Test Explorer."
+          },
+          "powershell.pester.hideSkippedBecauseMessages": {
+            "type": "boolean",
+            "default": false,
+            "markdownDescription": "Do not surface Pester's `because <reason>` text for skipped tests in the Test Output panel. Enable when the reasons are too chatty for your taste."
+          },
+          "powershell.pester.autoDebugOnSave": {
+            "type": "boolean",
+            "default": false,
+            "markdownDescription": "When the **Run** profile is in continuous (re-run on save) mode, re-execute through the **Debug** profile instead of the **Run** profile. The very first run is still a plain run; only re-runs triggered by file changes are debugged. Has no effect when continuous mode is started from the Debug or Coverage profile."
+          },
+          "powershell.pester.testChangeTimeout": {
+            "type": "number",
+            "default": 250,
+            "minimum": 0,
+            "markdownDescription": "Debounce window in milliseconds before a continuous Pester run reacts to file changes. Lower values feel snappier, higher values batch noisy editors. `0` re-runs synchronously on every event."
           }
         }
       },

@@ -511,6 +511,24 @@ function Emit-ResultsForBlock {
             $payload.errors = $errs
         }
 
+        if ($status -eq 'skipped') {
+            # Pester 5 records the `-Because` reason on ErrorRecord even
+            # for skipped tests (Set-ItResult -Skipped -Because '...'),
+            # and falls back to FailureMessage / StandardOutput for older
+            # APIs. Surface whichever is non-empty so the TS controller
+            # can decide whether to display it.
+            $skipMsg = $null
+            if ($it.ErrorRecord -and $it.ErrorRecord.Count -gt 0) {
+                $skipMsg = "$($it.ErrorRecord[0].Exception.Message)"
+            }
+            if (-not $skipMsg -and $it.PSObject.Properties['FailureMessage'] -and $it.FailureMessage) {
+                $skipMsg = [string]$it.FailureMessage
+            }
+            if ($skipMsg) {
+                $payload.skipMessage = $skipMsg
+            }
+        }
+
         Write-JsonLine $payload
     }
 

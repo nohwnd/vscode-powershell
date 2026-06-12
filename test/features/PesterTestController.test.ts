@@ -413,6 +413,53 @@ describe("PesterTestController helpers", function () {
             }
         });
 
+        it("appends the Pester skipMessage to test output by default", function () {
+            const ctx = buildContext();
+            try {
+                reportRunnerEvent(
+                    {
+                        type: "result",
+                        id: "t1",
+                        status: "skipped",
+                        durationMs: 0,
+                        skipMessage: "needs network",
+                    },
+                    ctx.run,
+                    ctx.itemsById,
+                    ctx.results,
+                );
+                assert.strictEqual(ctx.calls[0].method, "skipped");
+                assert.strictEqual(ctx.output.length, 1);
+                assert.match(ctx.output[0].text, /Skipped: needs network/);
+                assert.strictEqual(ctx.output[0].testId, "t1");
+            } finally {
+                ctx.controller.dispose();
+            }
+        });
+
+        it("suppresses the skipMessage when hideSkippedBecauseMessages is true", function () {
+            const ctx = buildContext();
+            try {
+                reportRunnerEvent(
+                    {
+                        type: "result",
+                        id: "t1",
+                        status: "skipped",
+                        durationMs: 0,
+                        skipMessage: "needs network",
+                    },
+                    ctx.run,
+                    ctx.itemsById,
+                    ctx.results,
+                    { hideSkippedBecauseMessages: true },
+                );
+                assert.strictEqual(ctx.calls[0].method, "skipped");
+                assert.strictEqual(ctx.output.length, 0);
+            } finally {
+                ctx.controller.dispose();
+            }
+        });
+
         it("ignores non-result events", function () {
             const ctx = buildContext();
             try {
