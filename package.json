@@ -55,6 +55,7 @@
   "activationEvents": [
     "onDebugResolve:PowerShell",
     "onLanguage:powershell",
+    "workspaceContains:**/*.[tT]ests.ps1",
     "onCommand:PowerShell.PickPSHostProcess",
     "onCommand:PowerShell.PickRunspace",
     "onCommand:PowerShell.SpecifyScriptArgs"
@@ -1126,6 +1127,11 @@
             },
             "default": [],
             "markdownDescription": "Glob patterns (relative to the workspace folder) of source files to include in code coverage when running tests through the Test Explorer's Coverage profile. When empty, defaults to every `*.ps1`/`*.psm1` file in the workspace that is not a `*.Tests.ps1` file."
+          },
+          "powershell.pester.useChildProcessRunner": {
+            "type": "boolean",
+            "default": false,
+            "markdownDescription": "Spawn a fresh `pwsh` process for every Pester discovery and run instead of reusing a persistent worker. Slower, but useful if the persistent worker is misbehaving in a specific environment."
           },
           "powershell.pester.outputVerbosity": {
             "type": "string",

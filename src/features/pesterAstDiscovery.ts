@@ -1,0 +1,441 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+import * as path from "path";
+import type { PesterTestNode } from "./pesterRunnerInvoker";
+import vscode = require("vscode");
+
+/**
+ * Eager test discovery via PSES's `documentSymbol` provider.
+ *
+ * Why a second discovery path? VS Code only calls `TestController.resolveHandler`
+ * when the user expands a file in the Test Explorer, which means in-editor
+ * "gutter" decorations (the green/red dots next to each `It` / `Describe`)
+ * never appear before the user has shown some interest in a file.
+ *
+ * PowerShell Editor Services already walks the AST eagerly to produce CodeLens
+ * entries for `Describe` / `Context` / `It`, so we piggy-back on the same
+ * symbols. They arrive as a flat `SymbolInformation`-shaped list (PSES uses
+ * `SymbolType.Function`), but `vscode.executeDocumentSymbolProvider` may
+ * return nested `DocumentSymbol[]` from other extensions — both shapes work.
+ *
+ * The IDs we produce here MUST match what `PesterRunner.ps1 -Discover` emits,
+ * so that when the user clicks "Run" on an AST-discovered item the runner's
+ * result events bind to the right `TestItem`. The shared scheme is:
+ *
+ *     `${absoluteFilePath}::${chainOfNames.join(' > ')}`
+ *
+ * where each chain element is the trimmed `Name` of the Pester block / test
+ * (so `Describe 'Get-Greeting'` contributes `Get-Greeting`, not `Describe 'Get-Greeting'`).
+ */
+
+const PESTER_BLOCK_REGEX = /^(Describe|Context|It)\b/i;
+
+/**
+ * Extract the test name (the first string / bareword argument) from the
+ * leading line of a Pester block, as captured by PSES's symbol provider.
+ *
+ * PSES sets the symbol name to the trimmed text of the line up to but not
+ * including the opening `{`, e.g. `Describe 'Get-Greeting'`, `It "throws on
+ * empty"`, `Context -Name MyContext -Tag Slow`. We accept:
+ *   - single-quoted strings: `Describe 'Foo'`
+ *   - double-quoted strings: `It "foo"`
+ *   - barewords with no whitespace: `Context Foo`
+ *   - explicit `-Name <value>` form (PSES often emits this verbatim).
+ */
+export function extractPesterBlockName(
+    symbolName: string,
+): { keyword: "Describe" | "Context" | "It"; name: string } | undefined {
+    const trimmed = symbolName.trim();
+    const keywordMatch = /^(Describe|Context|It)\b/i.exec(trimmed);
+    if (keywordMatch === null) {
+        return undefined;
+    }
+    const keyword = keywordMatch[1].toLowerCase();
+    const normalised =
+        keyword === "describe"
+            ? "Describe"
+            : keyword === "context"
+              ? "Context"
+              : "It";
+    let rest = trimmed.substring(keywordMatch[0].length).trim();
+    // Strip a trailing opening brace if PSES left it (defensive — its
+    // CodeLens path normally removes it already).
+    if (rest.endsWith("{")) {
+        rest = rest.slice(0, -1).trimEnd();
+    }
+    if (rest.length === 0) {
+        return undefined;
+    }
+    // Skip a leading `-Name ` parameter, including its short form.
+    const nameParam = /^-Name\s+/i.exec(rest);
+    if (nameParam !== null) {
+        rest = rest.substring(nameParam[0].length);
+    }
+    // Quoted: capture between matching quotes, allowing PowerShell's `''` and
+    // `""` escape sequences inside (we only consume up to the closing quote
+    // that isn't doubled).
+    const quoteChar = rest.charAt(0);
+    if (quoteChar === "'" || quoteChar === '"') {
+        let i = 1;
+        let value = "";
+        while (i < rest.length) {
+            const ch = rest.charAt(i);
+            if (ch === quoteChar) {
+                if (rest.charAt(i + 1) === quoteChar) {
+                    value += ch;
+                    i += 2;
+                    continue;
+                }
+                return { keyword: normalised, name: value };
+            }
+            value += ch;
+            i++;
+        }
+        // Unterminated quote — bail out rather than guess.
+        return undefined;
+    }
+    // Bareword: name runs until whitespace or end.
+    const bareword = /^(\S+)/.exec(rest);
+    if (bareword === null) {
+        return undefined;
+    }
+    return { keyword: normalised, name: bareword[1] };
+}
+
+/**
+ * A unified shape covering the two return types of
+ * `vscode.executeDocumentSymbolProvider`: nested `DocumentSymbol[]` and flat
+ * `SymbolInformation[]`. We only care about a name and the range that the
+ * symbol covers.
+ */
+interface UnifiedSymbol {
+    name: string;
+    range: vscode.Range;
+    children: UnifiedSymbol[];
+}
+
+function flatten(
+    raw:
+        | vscode.DocumentSymbol[]
+        | vscode.SymbolInformation[]
+        | null
+        | undefined,
+): UnifiedSymbol[] {
+    if (raw === null || raw === undefined) {
+        return [];
+    }
+    const out: UnifiedSymbol[] = [];
+    for (const item of raw) {
+        // `executeDocumentSymbolProvider` returns either nested
+        // `DocumentSymbol[]` or flat `SymbolInformation[]`. Distinguish by
+        // structural property — `children` on DocumentSymbol, `location` on
+        // SymbolInformation. The `unknown` cast appeases the TS narrowing
+        // since both element types share the array slot.
+        const candidate = item as unknown as {
+            name: string;
+            children?: vscode.DocumentSymbol[];
+            range?: vscode.Range;
+            location?: vscode.Location;
+        };
+        if (candidate.children !== undefined && candidate.range !== undefined) {
+            out.push({
+                name: candidate.name,
+                range: candidate.range,
+                children: flatten(candidate.children),
+            });
+        } else if (candidate.location !== undefined) {
+            out.push({
+                name: candidate.name,
+                range: candidate.location.range,
+                children: [],
+            });
+        }
+    }
+    return out;
+}
+
+/**
+ * Convert document symbols into a `PesterTestNode[]` tree.
+ *
+ * If the symbols arrive flat (PSES), we rebuild the Describe → Context → It
+ * hierarchy by testing range containment in document order. If they arrive
+ * nested (a non-PSES provider), we descend through the children recursively.
+ */
+export function extractPesterBlocksFromSymbols(
+    symbols:
+        | vscode.DocumentSymbol[]
+        | vscode.SymbolInformation[]
+        | null
+        | undefined,
+    file: string,
+): PesterTestNode[] {
+    const unified = flatten(symbols);
+    const pesterOnly = collectPesterSymbols(unified);
+    if (pesterOnly.length === 0) {
+        return [];
+    }
+    // Sort so containers come before their children, then ties broken by
+    // earlier-end-first (which produces a stable parent before child).
+    pesterOnly.sort((a, b) => {
+        const c = a.range.start.compareTo(b.range.start);
+        if (c !== 0) {
+            return c;
+        }
+        return b.range.end.compareTo(a.range.end);
+    });
+
+    const fileNormal = normaliseFilePath(file);
+    const stack: { node: PesterTestNode; range: vscode.Range }[] = [];
+    const roots: PesterTestNode[] = [];
+
+    for (const sym of pesterOnly) {
+        const parsed = extractPesterBlockName(sym.name);
+        if (parsed === undefined) {
+            continue;
+        }
+        while (
+            stack.length > 0 &&
+            !stack[stack.length - 1].range.contains(sym.range)
+        ) {
+            stack.pop();
+        }
+        const chain = stack.map((s) => extractNameFromNodeId(s.node.id));
+        chain.push(parsed.name);
+        const id = `${fileNormal}::${chain.join(" > ")}`;
+        const node: PesterTestNode = {
+            id,
+            label: parsed.name,
+            kind: parsed.keyword === "It" ? "test" : "block",
+            file: fileNormal,
+            line: sym.range.start.line + 1,
+            children: [],
+        };
+        if (stack.length === 0) {
+            roots.push(node);
+        } else {
+            stack[stack.length - 1].node.children.push(node);
+        }
+        if (parsed.keyword !== "It") {
+            stack.push({ node, range: sym.range });
+        }
+    }
+    return roots;
+}
+
+function collectPesterSymbols(symbols: UnifiedSymbol[]): UnifiedSymbol[] {
+    const out: UnifiedSymbol[] = [];
+    const walk = (list: UnifiedSymbol[]): void => {
+        for (const s of list) {
+            if (PESTER_BLOCK_REGEX.test(s.name.trim())) {
+                out.push(s);
+            }
+            if (s.children.length > 0) {
+                walk(s.children);
+            }
+        }
+    };
+    walk(symbols);
+    return out;
+}
+
+function extractNameFromNodeId(id: string): string {
+    const sep = id.indexOf("::");
+    if (sep === -1) {
+        return id;
+    }
+    const chain = id.substring(sep + 2);
+    const lastSep = chain.lastIndexOf(" > ");
+    return lastSep === -1 ? chain : chain.substring(lastSep + 3);
+}
+
+/**
+ * Normalise a file path so we produce the same string PSES (uppercase drive
+ * letter) and the runner (output of `Resolve-Path`) both use.
+ */
+function normaliseFilePath(file: string): string {
+    const resolved = path.resolve(file);
+    if (process.platform === "win32" && /^[a-z]:/.test(resolved)) {
+        return resolved.charAt(0).toUpperCase() + resolved.substring(1);
+    }
+    return resolved;
+}
+
+/**
+ * A text-based fallback that scans a `*.Tests.ps1` document for
+ * `Describe` / `Context` / `It` calls and builds a `PesterTestNode[]`
+ * tree by tracking `{}` brace depth.
+ *
+ * We use this when PSES's `documentSymbol` provider doesn't respond (the
+ * language server may still be starting up, may not be installed, or may be
+ * broken). It deliberately doesn't try to be clever about strings, here-docs,
+ * or comments — for the gutter-decoration use case, missing a couple of
+ * edge-case blocks is fine, but never producing anything is not.
+ *
+ * Items declared with `-ForEach` or `-TestCases` are reported as `block`s
+ * (rather than `test`s) because Pester expands one source-line declaration
+ * into N tests at run time. The controller will trigger a real runner
+ * discovery to fill in the expanded cases.
+ */
+const TEST_LINE_REGEX = /^[\s\t]*(Describe|Context|It)\b/i;
+const TEST_FULL_REGEX =
+    /^[\s\t]*(Describe|Context|It)\s+(?:-Name\s+)?(?:'((?:''|[^'])*)'|"((?:""|[^"])*)"|(\S+))/i;
+const FOREACH_LINE_REGEX = /(-ForEach|-TestCases)\b/i;
+
+export function extractPesterBlocksFromText(
+    text: string,
+    file: string,
+): PesterTestNode[] {
+    interface Frame {
+        node: PesterTestNode;
+        brace: number;
+    }
+    const roots: PesterTestNode[] = [];
+    const stack: Frame[] = [];
+    const lines = text.split(/\r?\n/);
+    let brace = 0;
+    for (let lineNo = 0; lineNo < lines.length; lineNo++) {
+        const line = lines[lineNo];
+        if (TEST_LINE_REGEX.test(line)) {
+            const match = TEST_FULL_REGEX.exec(line);
+            if (match !== null) {
+                const keyword = (match[1].charAt(0).toUpperCase() +
+                    match[1].slice(1).toLowerCase()) as
+                    | "Describe"
+                    | "Context"
+                    | "It";
+                // The regex's quoted/bareword alternatives are mutually
+                // exclusive — exactly one of groups 2/3/4 carries the name.
+                // ESLint flags `!== undefined` as "always true" because the
+                // capture-group types are inferred as plain string; use a
+                // truthiness check instead, accepting that an empty quoted
+                // name (`It '' {}`) collapses to the bareword branch.
+                const rawSingle = match[2];
+                const rawDouble = match[3];
+                const rawBare = match[4];
+                let name: string;
+                if (typeof rawSingle === "string") {
+                    name = rawSingle.replace(/''/g, "'");
+                } else if (typeof rawDouble === "string") {
+                    name = rawDouble.replace(/""/g, '"');
+                } else {
+                    name = rawBare;
+                }
+                while (
+                    stack.length > 0 &&
+                    brace <= stack[stack.length - 1].brace
+                ) {
+                    stack.pop();
+                }
+                const chain = stack.map((f) =>
+                    extractNameFromNodeId(f.node.id),
+                );
+                chain.push(name);
+                const id = `${file}::${chain.join(" > ")}`;
+                // Items declared with `-ForEach` or `-TestCases` expand into
+                // N tests at runtime; surface them as blocks so the user gets
+                // a chevron and the runner can fill in the real cases.
+                const hasForEach = FOREACH_LINE_REGEX.test(line);
+                const node: PesterTestNode = {
+                    id,
+                    label: name,
+                    kind: keyword === "It" && !hasForEach ? "test" : "block",
+                    file,
+                    line: lineNo + 1,
+                    children: [],
+                };
+                if (stack.length === 0) {
+                    roots.push(node);
+                } else {
+                    stack[stack.length - 1].node.children.push(node);
+                }
+                // Open the new scope at the current brace level. The `{`
+                // counter is bumped below when we process the same line's
+                // characters. Also push `It -ForEach` so descendant blocks
+                // (rare but legal) would still be tracked.
+                stack.push({ node, brace });
+            }
+        }
+        brace += countBracesIgnoringStrings(line);
+    }
+    return roots;
+}
+
+/**
+ * Count `{` minus `}` on a single line while ignoring those inside the most
+ * common PowerShell string forms and line comments. Far from a real parser,
+ * but enough for typical Pester layouts.
+ */
+function countBracesIgnoringStrings(line: string): number {
+    let depth = 0;
+    let i = 0;
+    while (i < line.length) {
+        const ch = line.charAt(i);
+        if (ch === "#") {
+            break;
+        }
+        if (ch === "'") {
+            i++;
+            while (i < line.length) {
+                if (line.charAt(i) === "'") {
+                    if (line.charAt(i + 1) === "'") {
+                        i += 2;
+                        continue;
+                    }
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            continue;
+        }
+        if (ch === '"') {
+            i++;
+            while (i < line.length) {
+                if (line.charAt(i) === "`" && i + 1 < line.length) {
+                    i += 2;
+                    continue;
+                }
+                if (line.charAt(i) === '"') {
+                    if (line.charAt(i + 1) === '"') {
+                        i += 2;
+                        continue;
+                    }
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            continue;
+        }
+        if (ch === "{") {
+            depth++;
+        } else if (ch === "}") {
+            depth--;
+        }
+        i++;
+    }
+    return depth;
+}
+
+/** True when the document should be considered for Pester AST discovery. */
+export function isPesterTestDocument(uri: vscode.Uri): boolean {
+    if (uri.scheme !== "file") {
+        return false;
+    }
+    return /\.tests\.ps1$/i.test(uri.fsPath);
+}
+
+/**
+ * Ask VS Code for the document symbols of `uri` and translate them into a
+ * `PesterTestNode[]` tree. Returns an empty array if no provider responds
+ * (e.g. PSES not yet activated) or the file has no Pester blocks.
+ */
+export async function discoverViaDocumentSymbols(
+    uri: vscode.Uri,
+): Promise<PesterTestNode[]> {
+    const symbols = await vscode.commands.executeCommand<
+        vscode.DocumentSymbol[] | vscode.SymbolInformation[] | undefined
+    >("vscode.executeDocumentSymbolProvider", uri);
+    return extractPesterBlocksFromSymbols(symbols, uri.fsPath);
+}

@@ -39,12 +39,22 @@ export interface ErrorEvent {
     type: "error";
     message: string;
 }
+export interface OutputEvent {
+    type: "output";
+    text: string;
+    testId?: string;
+}
+export interface ReadyEvent {
+    type: "ready";
+}
 export type RunnerEvent =
     | StartEvent
     | FileEvent
     | ResultEvent
     | EndEvent
-    | ErrorEvent;
+    | ErrorEvent
+    | OutputEvent
+    | ReadyEvent;
 
 export interface DiscoverOptions {
     paths: string[];
@@ -57,7 +67,7 @@ export interface CoverageOptions {
 
 export interface RunOptions {
     paths: string[];
-    lineNumber?: number;
+    lineNumbers?: number[];
     coverage?: CoverageOptions;
     outputVerbosity?:
         | "None"
@@ -113,8 +123,8 @@ export class ChildProcessPesterRunnerInvoker implements IPesterRunnerInvoker {
         token: vscode.CancellationToken,
     ): Promise<number> {
         const args = ["-Run", "-Path", ...opts.paths];
-        if (opts.lineNumber !== undefined && opts.lineNumber > 0) {
-            args.push("-LineNumber", String(opts.lineNumber));
+        if (opts.lineNumbers !== undefined && opts.lineNumbers.length > 0) {
+            args.push("-LineNumber", ...opts.lineNumbers.map((n) => String(n)));
         }
         if (opts.outputVerbosity !== undefined) {
             args.push("-OutputVerbosity", opts.outputVerbosity);

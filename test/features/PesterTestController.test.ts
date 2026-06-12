@@ -34,8 +34,10 @@ interface RecordedCall {
 function makeRecordingRun(): {
     run: vscode.TestRun;
     calls: RecordedCall[];
+    output: { text: string; testId?: string }[];
 } {
     const calls: RecordedCall[] = [];
+    const output: { text: string; testId?: string }[] = [];
     const run = {
         passed(item: vscode.TestItem, duration?: number): void {
             calls.push({ method: "passed", id: item.id, duration });
@@ -81,14 +83,18 @@ function makeRecordingRun(): {
         addCoverage(): void {
             /* unused */
         },
-        appendOutput(): void {
-            /* unused */
+        appendOutput(
+            text: string,
+            _location?: vscode.Location,
+            target?: vscode.TestItem,
+        ): void {
+            output.push({ text, testId: target?.id });
         },
         name: undefined,
         token: { isCancellationRequested: false } as vscode.CancellationToken,
         isPersisted: false,
     } as unknown as vscode.TestRun;
-    return { run, calls };
+    return { run, calls, output };
 }
 
 describe("PesterTestController helpers", function () {
@@ -207,6 +213,7 @@ describe("PesterTestController helpers", function () {
         function buildContext(): {
             run: vscode.TestRun;
             calls: RecordedCall[];
+            output: { text: string; testId?: string }[];
             itemsById: Map<string, vscode.TestItem>;
             results: Map<string, ResultEvent>;
             controller: vscode.TestController;
@@ -219,8 +226,8 @@ describe("PesterTestController helpers", function () {
             controller.items.add(item);
             const itemsById = new Map([["t1", item]]);
             const results = new Map<string, ResultEvent>();
-            const { run, calls } = makeRecordingRun();
-            return { run, calls, itemsById, results, controller };
+            const { run, calls, output } = makeRecordingRun();
+            return { run, calls, output, itemsById, results, controller };
         }
 
         it("records a passed test with duration", function () {
@@ -366,6 +373,58 @@ describe("PesterTestController helpers", function () {
                 // caller's "fill missing as skipped" logic doesn't mark it.
                 assert.deepStrictEqual(ctx.calls, []);
                 assert.ok(ctx.results.has("unknown"));
+            } finally {
+                ctx.controller.dispose();
+            }
+        });
+
+        it("routes an unscoped output event to the test run", function () {
+            const ctx = buildContext();
+            try {
+                reportRunnerEvent(
+                    { type: "output", text: "hello world\r\n" },
+                    ctx.run,
+                    ctx.itemsById,
+                    ctx.results,
+                );
+                assert.deepStrictEqual(ctx.output, [
+                    { text: "hello world\r\n", testId: undefined },
+                ]);
+                assert.deepStrictEqual(ctx.calls, []);
+            } finally {
+                ctx.controller.dispose();
+            }
+        });
+
+        it("scopes an output event to its test when testId matches", function () {
+            const ctx = buildContext();
+            try {
+                reportRunnerEvent(
+                    { type: "output", text: "scoped\r\n", testId: "t1" },
+                    ctx.run,
+                    ctx.itemsById,
+                    ctx.results,
+                );
+                assert.deepStrictEqual(ctx.output, [
+                    { text: "scoped\r\n", testId: "t1" },
+                ]);
+            } finally {
+                ctx.controller.dispose();
+            }
+        });
+
+        it("falls back to run-level output when the testId is unknown", function () {
+            const ctx = buildContext();
+            try {
+                reportRunnerEvent(
+                    { type: "output", text: "drift\r\n", testId: "missing" },
+                    ctx.run,
+                    ctx.itemsById,
+                    ctx.results,
+                );
+                assert.deepStrictEqual(ctx.output, [
+                    { text: "drift\r\n", testId: undefined },
+                ]);
             } finally {
                 ctx.controller.dispose();
             }
