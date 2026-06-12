@@ -13,6 +13,11 @@ export interface PesterTestNode {
     file: string;
     line: number;
     children: PesterTestNode[];
+    /**
+     * Pester `-Tag` values declared on the block or test. Surfaced as
+     * `vscode.TestTag` so the Test Explorer can filter on them.
+     */
+    tags?: string[];
 }
 
 export interface StartEvent {
@@ -25,12 +30,24 @@ export interface FileEvent {
     file: string;
     tests: PesterTestNode[];
 }
+export interface ResultError {
+    message: string;
+    stack: string;
+    /**
+     * For assertion failures, the expected / actual values pulled out of
+     * Pester's `Expected X, but got Y` error message. When both are set
+     * the controller emits a `TestMessage.diff()` so VS Code can render
+     * a proper side-by-side diff.
+     */
+    expected?: string;
+    actual?: string;
+}
 export interface ResultEvent {
     type: "result";
     id: string;
     status: "passed" | "failed" | "skipped" | "errored";
     durationMs: number;
-    errors?: { message: string; stack: string }[];
+    errors?: ResultError[];
 }
 export interface EndEvent {
     type: "end";
@@ -58,6 +75,14 @@ export type RunnerEvent =
 
 export interface DiscoverOptions {
     paths: string[];
+    /**
+     * Extra settings forwarded to PesterRunner.ps1 so the user can pin a
+     * specific Pester module, run from a custom working directory, or load
+     * a base `.psd1` configuration.
+     */
+    pesterModulePath?: string;
+    workingDirectory?: string;
+    configurationPath?: string;
 }
 
 export interface CoverageOptions {
@@ -76,6 +101,27 @@ export interface RunOptions {
         | "Detailed"
         | "Diagnostic"
         | "FromPreference";
+    pesterModulePath?: string;
+    workingDirectory?: string;
+    configurationPath?: string;
+}
+
+/**
+ * Append the cross-cutting `-PesterModulePath` / `-ConfigurationPath` switches
+ * (when set) to a runner script argument list. Both the child-process and
+ * persistent invokers use this so the flag names stay in lockstep with
+ * `PesterRunner.ps1`.
+ */
+export function appendCommonOptionArgs(
+    args: string[],
+    opts: { pesterModulePath?: string; configurationPath?: string },
+): void {
+    if (opts.pesterModulePath !== undefined && opts.pesterModulePath !== "") {
+        args.push("-PesterModulePath", opts.pesterModulePath);
+    }
+    if (opts.configurationPath !== undefined && opts.configurationPath !== "") {
+        args.push("-ConfigurationPath", opts.configurationPath);
+    }
 }
 
 /**
@@ -114,7 +160,8 @@ export class ChildProcessPesterRunnerInvoker implements IPesterRunnerInvoker {
         token: vscode.CancellationToken,
     ): Promise<number> {
         const args = ["-Discover", "-Path", ...opts.paths];
-        return this.execute(args, onEvent, token);
+        appendCommonOptionArgs(args, opts);
+        return this.execute(args, opts.workingDirectory, onEvent, token);
     }
 
     public async run(
@@ -139,11 +186,13 @@ export class ChildProcessPesterRunnerInvoker implements IPesterRunnerInvoker {
                 args.push("-CoverageSourcePath", ...opts.coverage.sourcePaths);
             }
         }
-        return this.execute(args, onEvent, token);
+        appendCommonOptionArgs(args, opts);
+        return this.execute(args, opts.workingDirectory, onEvent, token);
     }
 
     private execute(
         scriptArgs: string[],
+        workingDirectory: string | undefined,
         onEvent: (event: RunnerEvent) => void,
         token: vscode.CancellationToken,
     ): Promise<number> {
@@ -162,6 +211,10 @@ export class ChildProcessPesterRunnerInvoker implements IPesterRunnerInvoker {
 
             const child = spawn(this.powerShellExecutable, fullArgs, {
                 stdio: ["ignore", "pipe", "pipe"],
+                cwd:
+                    workingDirectory !== undefined && workingDirectory !== ""
+                        ? workingDirectory
+                        : undefined,
             });
 
             let stdoutBuffer = "";

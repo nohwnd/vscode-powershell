@@ -102,7 +102,7 @@ describe("extractPesterBlockName", function () {
 describe("extractPesterBlocksFromSymbols", function () {
     const file =
         process.platform === "win32"
-            ? "C:\\repo\\Sample.Tests.ps1"
+            ? vscode.Uri.file("C:\\repo\\Sample.Tests.ps1").fsPath
             : "/repo/Sample.Tests.ps1";
 
     it("builds a Describe > Context > It tree from nested DocumentSymbols", function () {
@@ -131,11 +131,11 @@ describe("extractPesterBlocksFromSymbols", function () {
         const firstIt = describe.children[0].children[0];
         assert.strictEqual(firstIt.label, "returns hello");
         assert.strictEqual(firstIt.kind, "test");
-        // ID scheme must match PesterRunner.ps1: `<file>::<Name> > <Name> > ...`.
-        const expectedFile = file;
+        // ID scheme must match PesterRunner.ps1:
+        //   <file>>>Name>>Name>>...
         assert.strictEqual(
             firstIt.id,
-            `${expectedFile}::Get-Greeting > with a name > returns hello`,
+            `${file}>>Get-Greeting>>with a name>>returns hello`,
         );
     });
 
@@ -209,7 +209,7 @@ describe("extractPesterBlocksFromSymbols", function () {
 describe("extractPesterBlocksFromText", function () {
     const file =
         process.platform === "win32"
-            ? "C:\\repo\\Sample.Tests.ps1"
+            ? vscode.Uri.file("C:\\repo\\Sample.Tests.ps1").fsPath
             : "/repo/Sample.Tests.ps1";
 
     it("parses a real Greeter.Tests.ps1-shaped file", function () {
@@ -255,7 +255,7 @@ describe("extractPesterBlocksFromText", function () {
         assert.strictEqual(plain.children[0].kind, "test");
         assert.strictEqual(
             plain.children[0].id,
-            `${file}::Get-Greeting > with a plain name > returns the default Hello greeting`,
+            `${file}>>Get-Greeting>>with a plain name>>returns the default Hello greeting`,
         );
 
         const farewell = tree[1];

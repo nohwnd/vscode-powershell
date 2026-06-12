@@ -55,7 +55,21 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [ValidateSet('None', 'Minimal', 'Normal', 'Detailed', 'Diagnostic', 'FromPreference')]
-    [string]$OutputVerbosity = 'Normal'
+    [string]$OutputVerbosity = 'Normal',
+
+    [Parameter(ParameterSetName = 'Discover')]
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Serve')]
+    [string]$PesterModulePath,
+
+    [Parameter(ParameterSetName = 'Discover')]
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Serve')]
+    [string]$WorkingDirectory,
+
+    [Parameter(ParameterSetName = 'Discover')]
+    [Parameter(ParameterSetName = 'Run')]
+    [string]$ConfigurationPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -156,6 +170,29 @@ function ConvertTo-OutputText {
 }
 
 function Get-CompatiblePester {
+    param(
+        [string]$ModulePath
+    )
+    if ($ModulePath) {
+        if (-not (Test-Path -LiteralPath $ModulePath)) {
+            Write-JsonLine @{
+                type    = 'error'
+                message = "PesterModulePath '$ModulePath' does not exist."
+            }
+            exit 2
+        }
+        # Accept either a folder, a .psd1 manifest, or a .psm1 root module.
+        Import-Module -Name $ModulePath -Force
+        $candidate = Get-Module Pester | Sort-Object Version -Descending | Select-Object -First 1
+        if (-not $candidate -or $candidate.Version -lt [version]'5.0.0') {
+            Write-JsonLine @{
+                type    = 'error'
+                message = "Pester 5.0.0 or newer is required (got '$($candidate.Version)' from '$ModulePath')."
+            }
+            exit 2
+        }
+        return $candidate
+    }
     $candidate = Get-Module Pester -ListAvailable |
         Where-Object { $_.Version -ge [version]'5.0.0' } |
         Sort-Object Version -Descending |
@@ -171,14 +208,65 @@ function Get-CompatiblePester {
     return $candidate
 }
 
+function Get-BaseConfiguration {
+    param(
+        [string]$ConfigurationPath
+    )
+    # Honour a user-supplied .psd1 Pester configuration: load it, then layer
+    # the per-call overrides (paths, line numbers, coverage, verbosity) on
+    # top in the caller. Matches the behaviour of pester/vscode-adapter.
+    if (-not $ConfigurationPath) {
+        return New-PesterConfiguration
+    }
+    if (-not (Test-Path -LiteralPath $ConfigurationPath)) {
+        Write-JsonLine @{
+            type    = 'error'
+            message = "ConfigurationPath '$ConfigurationPath' does not exist."
+        }
+        exit 2
+    }
+    try {
+        $data = Import-PowerShellDataFile -Path $ConfigurationPath
+    } catch {
+        Write-JsonLine @{
+            type    = 'error'
+            message = "Failed to load ConfigurationPath '$ConfigurationPath': $($_.Exception.Message)"
+        }
+        exit 2
+    }
+    return New-PesterConfiguration -Hashtable $data
+}
+
 function Get-TestId {
     param(
         [Parameter(Mandatory)][string]$File,
-        [Parameter(Mandatory)][string[]]$Chain
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Path,
+        $Data
     )
-    # Stable identifier: <absolute file path>::<chain joined by ' > '>.
-    # The chain mirrors Pester's `ExpandedPath`/`Path` view of a test.
-    return "${File}::" + ($Chain -join ' > ')
+    # Stable, ForEach-safe identifier matching the TS side and the original
+    # pester/vscode-adapter scheme:
+    #     <file>>>BlockName>>BlockName>>TestName[>>Key=Value...]
+    # The name segments are the UNEXPANDED Pester names (e.g. `greets <Name>`),
+    # not the expanded per-iteration label. The data suffix is a sorted list
+    # of `Key=Value` from the test's merged Data hashtable so each ForEach
+    # iteration gets a unique id without our having to expand placeholders.
+    foreach ($segment in $Path) {
+        if ([string]$segment -match '>>') {
+            throw "Pester test names cannot contain '>>' (the test id separator). Offending name: '$segment' in chain '$($Path -join ' > ')'."
+        }
+    }
+    $segments = New-Object System.Collections.Generic.List[string]
+    $segments.Add($File) | Out-Null
+    foreach ($segment in $Path) {
+        $segments.Add([string]$segment) | Out-Null
+    }
+    if ($Data -is [System.Collections.IDictionary] -and $Data.Count -gt 0) {
+        $sortedKeys = @($Data.Keys | Sort-Object { [string]$_ })
+        foreach ($key in $sortedKeys) {
+            $segments.Add("$key=$($Data[$key])") | Out-Null
+        }
+    }
+    return ($segments -join '>>')
 }
 
 # Pester normalises `$container.Item.FullName` (e.g. drive-letter casing on
@@ -207,11 +295,10 @@ function Resolve-OriginalPath {
 
 # Resolve `<placeholder>` tokens in a Pester test name against its `Data`
 # hashtable. Mirrors what Pester does for ExpandedName *after* a test
-# actually executes — but ExpandedName is empty during -SkipRun discovery,
-# which leaves every ForEach iteration sharing a single template name and
-# colliding on id. Doing the expansion ourselves at discovery time gives
-# each iteration a stable, unique id that round-trips with the run-time
-# result events (where Pester's own ExpandedName is set).
+# actually executes. We only use the expanded form for the human-readable
+# LABEL (Test Explorer column); test ids are always built from the
+# unexpanded name + sorted data items so discovery and run agree without
+# any reconciliation step.
 function Expand-PesterName {
     param(
         [string]$Template,
@@ -241,9 +328,83 @@ function Expand-PesterName {
     return $result
 }
 
+# Walk a Pester Test/Block's ancestor chain and merge every `Data` hashtable
+# along the way, with deeper-nested values overriding shallower ones — the
+# same behaviour as pester/vscode-adapter's Merge-TestData. This makes the
+# id stable when `-ForEach` is declared on a Describe/Context block rather
+# than on the innermost `It`.
+function Get-MergedData {
+    param($Item)
+    if ($null -eq $Item) { return $null }
+
+    $chain = @()
+    $current = $Item
+    while ($null -ne $current) {
+        $chain = @($current) + $chain
+        $current = if ($current.PSObject.Properties['Parent']) { $current.Parent } else { $null }
+    }
+
+    $merged = [ordered]@{}
+    foreach ($node in $chain) {
+        $data = if ($node.PSObject.Properties['Data']) { $node.Data } else { $null }
+        if ($null -eq $data) { continue }
+        if ($data -is [System.Collections.IDictionary]) {
+            foreach ($key in $data.Keys) {
+                $merged[[string]$key] = $data[$key]
+            }
+        }
+        else {
+            # Non-dictionary `-ForEach` value lives under Pester's implicit
+            # `_` key.
+            $merged['_'] = $data
+        }
+    }
+    return $merged
+}
+
+# Pester `Should -Be 'X'` failures use the message form
+# `Expected 'X', but got 'Y'.`. Extract the two halves so the TS side can
+# render a real TestMessage.diff() instead of a plain string. Mirrors the
+# same regex used by pester/vscode-adapter.
+$script:ExpectedActualRegex = [regex]::new(
+    'Expected (?<expected>.+?), but (got )?(?<actual>.+?)\.\s*$',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline
+)
+
+function Get-ExpectedActual {
+    param($ErrorRecord)
+    if ($null -eq $ErrorRecord) { return $null }
+    $message = [string]$ErrorRecord
+    if ([string]::IsNullOrEmpty($message)) { return $null }
+    $m = $script:ExpectedActualRegex.Match($message)
+    if (-not $m.Success) { return $null }
+    return [ordered]@{
+        expected = $m.Groups['expected'].Value
+        actual   = $m.Groups['actual'].Value
+    }
+}
+
+# Collect Pester `-Tag` values into a clean string[] for emission. Both
+# Block.Tag and Test.Tag may be `$null`, a single string, or a string[].
+function Get-PesterTags {
+    param($Item)
+    if ($null -eq $Item) { return @() }
+    if (-not $Item.PSObject.Properties['Tag']) { return @() }
+    $raw = $Item.Tag
+    if ($null -eq $raw) { return @() }
+    $tags = @()
+    foreach ($t in @($raw)) {
+        if ($null -ne $t -and -not [string]::IsNullOrWhiteSpace([string]$t)) {
+            $tags += [string]$t
+        }
+    }
+    return ,$tags
+}
+
 # Prefer Pester's own ExpandedName when populated (always true post-run),
-# otherwise expand the template ourselves so discovery and run agree on
-# the per-iteration name even before tests have executed.
+# otherwise expand the template ourselves so iteration LABELS match the
+# Pester output. This is purely for display; ids never use the expanded
+# name.
 function Get-DisplayName {
     param($Item)
     if ($Item.PSObject.Properties['ExpandedName'] -and
@@ -258,32 +419,31 @@ function Get-DisplayName {
 function Get-BlockChildren {
     param(
         [Parameter(Mandatory)] $Block,
-        [Parameter(Mandatory)][string]$File,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Parents
+        [Parameter(Mandatory)][string]$File
     )
 
     $children = @()
-    $ownChain = $Parents + @($Block.Name)
 
     foreach ($child in $Block.Blocks) {
         $children += [pscustomobject]@{
-            id       = Get-TestId -File $File -Chain ($ownChain + @($child.Name))
-            label    = $child.Name
+            id       = Get-TestId -File $File -Path $child.Path -Data (Get-MergedData -Item $child)
+            label    = Get-DisplayName -Item $child
             kind     = 'block'
             file     = $File
             line     = [int]$child.StartLine
-            children = Get-BlockChildren -Block $child -File $File -Parents $ownChain
+            tags     = Get-PesterTags -Item $child
+            children = Get-BlockChildren -Block $child -File $File
         }
     }
 
     foreach ($it in $Block.Tests) {
-        $name = Get-DisplayName -Item $it
         $children += [pscustomobject]@{
-            id       = Get-TestId -File $File -Chain ($ownChain + @($name))
-            label    = $name
+            id       = Get-TestId -File $File -Path $it.Path -Data (Get-MergedData -Item $it)
+            label    = Get-DisplayName -Item $it
             kind     = 'test'
             file     = $File
             line     = [int]$it.StartLine
+            tags     = Get-PesterTags -Item $it
             children = @()
         }
     }
@@ -298,12 +458,13 @@ function Emit-Discovery {
         $tree = @()
         foreach ($block in $container.Blocks) {
             $tree += [pscustomobject]@{
-                id       = Get-TestId -File $file -Chain @($block.Name)
-                label    = $block.Name
+                id       = Get-TestId -File $file -Path $block.Path -Data (Get-MergedData -Item $block)
+                label    = Get-DisplayName -Item $block
                 kind     = 'block'
                 file     = $file
                 line     = [int]$block.StartLine
-                children = Get-BlockChildren -Block $block -File $file -Parents @()
+                tags     = Get-PesterTags -Item $block
+                children = Get-BlockChildren -Block $block -File $file
             }
         }
         Write-JsonLine @{ type = 'file'; file = $file; tests = $tree }
@@ -313,11 +474,8 @@ function Emit-Discovery {
 function Emit-ResultsForBlock {
     param(
         [Parameter(Mandatory)] $Block,
-        [Parameter(Mandatory)][string]$File,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Parents
+        [Parameter(Mandatory)][string]$File
     )
-
-    $ownChain = $Parents + @($Block.Name)
 
     foreach ($it in $Block.Tests) {
         $status = switch ($it.Result) {
@@ -329,14 +487,9 @@ function Emit-ResultsForBlock {
             default         { 'errored' }
         }
 
-        # Use ExpandedName when Pester supplies one (always for -ForEach
-        # / -TestCases tests post-run); fall back to expanding the template
-        # ourselves so iteration ids agree between discovery and run.
-        $itName = Get-DisplayName -Item $it
-
         $payload = [ordered]@{
             type       = 'result'
-            id         = Get-TestId -File $File -Chain ($ownChain + @($itName))
+            id         = Get-TestId -File $File -Path $it.Path -Data (Get-MergedData -Item $it)
             status     = $status
             durationMs = [double]$it.Duration.TotalMilliseconds
         }
@@ -344,10 +497,16 @@ function Emit-ResultsForBlock {
         if ($status -eq 'failed' -and $it.ErrorRecord) {
             $errs = @()
             foreach ($err in $it.ErrorRecord) {
-                $errs += [ordered]@{
+                $entry = [ordered]@{
                     message = "$($err.Exception.Message)"
                     stack   = "$($err.ScriptStackTrace)"
                 }
+                $diff = Get-ExpectedActual -ErrorRecord $err
+                if ($diff) {
+                    $entry.expected = $diff.expected
+                    $entry.actual   = $diff.actual
+                }
+                $errs += $entry
             }
             $payload.errors = $errs
         }
@@ -356,7 +515,7 @@ function Emit-ResultsForBlock {
     }
 
     foreach ($child in $Block.Blocks) {
-        Emit-ResultsForBlock -Block $child -File $File -Parents $ownChain
+        Emit-ResultsForBlock -Block $child -File $File
     }
 }
 
@@ -365,16 +524,17 @@ function Emit-RunResults {
     foreach ($container in $PesterResult.Containers) {
         $file = Resolve-OriginalPath -ContainerPath $container.Item.FullName -InputPaths $InputPaths
         foreach ($block in $container.Blocks) {
-            Emit-ResultsForBlock -Block $block -File $file -Parents @()
+            Emit-ResultsForBlock -Block $block -File $file
         }
     }
 }
 
 function Invoke-RunnerDiscover {
     param(
-        [Parameter(Mandatory)][string[]]$InputPaths
+        [Parameter(Mandatory)][string[]]$InputPaths,
+        [string]$ConfigurationPath
     )
-    $cfg = New-PesterConfiguration
+    $cfg = Get-BaseConfiguration -ConfigurationPath $ConfigurationPath
     $cfg.Run.Path = $InputPaths
     $cfg.Run.PassThru = $true
     $cfg.Run.SkipRun = $true
@@ -406,10 +566,11 @@ function Invoke-RunnerRun {
         [switch]$Coverage,
         [string]$CoveragePath,
         [string[]]$CoverageSourcePath,
-        [string]$OutputVerbosity = 'Normal'
+        [string]$OutputVerbosity = 'Normal',
+        [string]$ConfigurationPath
     )
 
-    $cfg = New-PesterConfiguration
+    $cfg = Get-BaseConfiguration -ConfigurationPath $ConfigurationPath
     $cfg.Run.Path = $InputPaths
     $cfg.Run.PassThru = $true
     $cfg.Output.Verbosity = $OutputVerbosity
@@ -465,8 +626,19 @@ function Invoke-RunnerRun {
 
 # Main ------------------------------------------------------------------------
 
-$script:PesterModule = Get-CompatiblePester
+$script:PesterModule = Get-CompatiblePester -ModulePath $PesterModulePath
 $script:CurrentRequestId = $null
+
+if ($WorkingDirectory) {
+    if (-not (Test-Path -LiteralPath $WorkingDirectory)) {
+        Write-JsonLine @{
+            type    = 'error'
+            message = "WorkingDirectory '$WorkingDirectory' does not exist."
+        }
+        exit 2
+    }
+    Set-Location -LiteralPath $WorkingDirectory
+}
 
 Write-JsonLine @{
     type    = 'start'
@@ -475,7 +647,7 @@ Write-JsonLine @{
 }
 
 if ($Discover) {
-    Invoke-RunnerDiscover -InputPaths $Path
+    Invoke-RunnerDiscover -InputPaths $Path -ConfigurationPath $ConfigurationPath
     Write-JsonLine @{ type = 'end' }
 }
 elseif ($Run) {
@@ -485,7 +657,8 @@ elseif ($Run) {
         -Coverage:$Coverage `
         -CoveragePath $CoveragePath `
         -CoverageSourcePath $CoverageSourcePath `
-        -OutputVerbosity $OutputVerbosity
+        -OutputVerbosity $OutputVerbosity `
+        -ConfigurationPath $ConfigurationPath
     Write-JsonLine @{ type = 'end' }
 }
 elseif ($Serve) {
@@ -518,10 +691,22 @@ elseif ($Serve) {
         $script:CurrentRequestId = if ($cmd.PSObject.Properties['requestId']) { [string]$cmd.requestId } else { $null }
         $op = [string]$cmd.op
         try {
+            # Per-call working directory: cheaper than restarting the worker.
+            # We rely on Pester resolving test paths from the cwd, so honour
+            # the setting on every command rather than once at startup.
+            if ($cmd.PSObject.Properties['workingDirectory'] -and $cmd.workingDirectory) {
+                $wd = [string]$cmd.workingDirectory
+                if (Test-Path -LiteralPath $wd) {
+                    Set-Location -LiteralPath $wd
+                } else {
+                    Write-JsonLine @{ type = 'error'; message = "workingDirectory '$wd' does not exist." }
+                }
+            }
+            $cfgPath = if ($cmd.PSObject.Properties['configurationPath']) { [string]$cmd.configurationPath } else { '' }
             switch ($op) {
                 'discover' {
                     $paths = @($cmd.path)
-                    Invoke-RunnerDiscover -InputPaths $paths
+                    Invoke-RunnerDiscover -InputPaths $paths -ConfigurationPath $cfgPath
                 }
                 'run' {
                     $paths = @($cmd.path)
@@ -536,7 +721,8 @@ elseif ($Serve) {
                         -Coverage:$cov `
                         -CoveragePath $covPath `
                         -CoverageSourcePath $covSrc `
-                        -OutputVerbosity $verb
+                        -OutputVerbosity $verb `
+                        -ConfigurationPath $cfgPath
                 }
                 'shutdown' {
                     $script:__keepServing = $false

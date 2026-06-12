@@ -10,6 +10,7 @@ import type { ILogger } from "../logging";
 import {
     discoverViaDocumentSymbols,
     extractPesterBlocksFromText,
+    ID_SEP,
     isPesterTestDocument,
 } from "./pesterAstDiscovery";
 import { PersistentPesterRunnerInvoker } from "./pesterPersistentInvoker";
@@ -21,10 +22,6 @@ import {
     type RunnerEvent,
 } from "./pesterRunnerInvoker";
 import vscode = require("vscode");
-
-const TEST_FILE_GLOB = "**/*.[tT]ests.ps1";
-
-const COEXISTING_EXTENSION_ID = "pspester.pester-test";
 
 /**
  * Native VS Code Test Explorer integration for Pester.
@@ -42,9 +39,6 @@ const COEXISTING_EXTENSION_ID = "pspester.pester-test";
  * up front; it does not invoke Pester until VS Code calls `resolveHandler`
  * for a specific file, or until a run is requested. This avoids running Pester
  * across the whole workspace at activation time.
- *
- * If the community extension `pspester.pester-test` is installed and active,
- * we skip registration to avoid two competing test trees.
  */
 export class PesterTestController implements vscode.Disposable {
     private readonly controller: vscode.TestController;
@@ -80,12 +74,16 @@ export class PesterTestController implements vscode.Disposable {
             (request, token): Promise<void> =>
                 this.runOrCoverage(request, token, false),
             true,
+            undefined,
+            true,
         );
 
         this.controller.createRunProfile(
             "Debug",
             vscode.TestRunProfileKind.Debug,
             (request, token): Promise<void> => this.debug(request, token),
+            true,
+            undefined,
             true,
         );
 
@@ -94,6 +92,8 @@ export class PesterTestController implements vscode.Disposable {
             vscode.TestRunProfileKind.Coverage,
             (request, token): Promise<void> =>
                 this.runOrCoverage(request, token, true),
+            true,
+            undefined,
             true,
         );
         coverageProfile.loadDetailedCoverage = (): Promise<
@@ -140,8 +140,9 @@ export class PesterTestController implements vscode.Disposable {
             ),
         );
 
-        const watcher =
-            vscode.workspace.createFileSystemWatcher(TEST_FILE_GLOB);
+        const watcher = vscode.workspace.createFileSystemWatcher(
+            this.getTestFileGlob(),
+        );
         watcher.onDidCreate((uri) => {
             this.ensureFileItem(uri);
         });
@@ -228,14 +229,14 @@ export class PesterTestController implements vscode.Disposable {
     }
 
     /**
-     * Detect whether another Pester Test Explorer integration is already
-     * loaded so we can stand down rather than competing with it.
+     * Reserved for future use; today this is always `true`. The legacy
+     * `pspester.pester-test` extension used to compete for the same test
+     * tree and we briefly stood down for it, but we now own the experience
+     * and intend to deprecate the third-party adapter rather than coexist
+     * with it.
      */
     public static shouldRegister(): boolean {
-        const existing = vscode.extensions.getExtension(
-            COEXISTING_EXTENSION_ID,
-        );
-        return existing === undefined;
+        return true;
     }
 
     // VS Code calls this with `undefined` once on startup, then again per
@@ -261,7 +262,7 @@ export class PesterTestController implements vscode.Disposable {
 
     private async discoverTopLevelFiles(): Promise<void> {
         const uris = await vscode.workspace.findFiles(
-            TEST_FILE_GLOB,
+            this.getTestFileGlob(),
             "**/node_modules/**",
         );
         const seen = new Set<string>();
@@ -301,9 +302,14 @@ export class PesterTestController implements vscode.Disposable {
 
     private async discoverFile(fileItem: vscode.TestItem): Promise<void> {
         const tokenSource = new vscode.CancellationTokenSource();
+        // Show the Test Explorer spinner on the file item while Pester is
+        // doing its discovery phase. Matches the behaviour of the
+        // pester/vscode-adapter extension.
+        fileItem.busy = true;
         try {
+            const settings = this.getRunnerSettings(fileItem.id);
             await this.invoker.discover(
-                { paths: [fileItem.id] },
+                { paths: [fileItem.id], ...settings },
                 (event) => {
                     if (
                         event.type === "file" &&
@@ -321,6 +327,7 @@ export class PesterTestController implements vscode.Disposable {
                 tokenSource.token,
             );
         } finally {
+            fileItem.busy = false;
             tokenSource.dispose();
         }
     }
@@ -448,6 +455,18 @@ export class PesterTestController implements vscode.Disposable {
         token: vscode.CancellationToken,
         coverage: boolean,
     ): Promise<void> {
+        if (request.continuous === true) {
+            await this.runContinuous(request, token, coverage);
+            return;
+        }
+        await this.runOnce(request, token, coverage);
+    }
+
+    private async runOnce(
+        request: vscode.TestRunRequest,
+        token: vscode.CancellationToken,
+        coverage: boolean,
+    ): Promise<void> {
         const run = this.controller.createTestRun(request);
         try {
             const tests = await this.collectRequestedTests(request);
@@ -493,6 +512,70 @@ export class PesterTestController implements vscode.Disposable {
     }
 
     /**
+     * Continuous run: re-execute the same request whenever any test file in
+     * the workspace changes. Matches the behaviour of the
+     * pester/vscode-adapter extension. The watcher is torn down when the
+     * caller cancels the run via the `CancellationToken`.
+     */
+    private async runContinuous(
+        request: vscode.TestRunRequest,
+        token: vscode.CancellationToken,
+        coverage: boolean,
+    ): Promise<void> {
+        const watcher = vscode.workspace.createFileSystemWatcher(
+            this.getTestFileGlob(),
+        );
+        let pending: NodeJS.Timeout | undefined;
+        let inFlight: Promise<void> | undefined;
+        const trigger = (): void => {
+            if (token.isCancellationRequested) {
+                return;
+            }
+            if (pending !== undefined) {
+                clearTimeout(pending);
+            }
+            // Debounce: a single Save can fire several events.
+            pending = setTimeout(() => {
+                pending = undefined;
+                const previous = inFlight ?? Promise.resolve();
+                inFlight = previous
+                    .then(() => {
+                        if (token.isCancellationRequested) {
+                            return;
+                        }
+                        return this.runOnce(request, token, coverage);
+                    })
+                    .catch((err: unknown) => {
+                        this.logger.writeError(
+                            `Pester continuous run failed: ${(err as Error).message}`,
+                        );
+                    });
+            }, 250);
+        };
+        const disposables: vscode.Disposable[] = [
+            watcher,
+            watcher.onDidChange(trigger),
+            watcher.onDidCreate(trigger),
+            watcher.onDidDelete(trigger),
+        ];
+        // First run immediately so the user sees results without having to
+        // touch a file.
+        await this.runOnce(request, token, coverage);
+        await new Promise<void>((resolve) => {
+            const cancelSub = token.onCancellationRequested(() => {
+                if (pending !== undefined) {
+                    clearTimeout(pending);
+                }
+                for (const d of disposables) {
+                    d.dispose();
+                }
+                cancelSub.dispose();
+                resolve();
+            });
+        });
+    }
+
+    /**
      * Identify which files the user wants to run in full. A file is "full"
      * when there is no `request.include` (run all) or when one of the
      * include entries IS the file item itself (so any line filter would be
@@ -512,6 +595,74 @@ export class PesterTestController implements vscode.Disposable {
             }
         }
         return out;
+    }
+
+    /**
+     * Read the user-overridable Pester runner settings (module path, working
+     * directory, configuration `.psd1`) for the workspace folder that owns
+     * `testFile`. Workspace-folder scoped so each workspace in a
+     * multi-root setup can pin its own values.
+     */
+    private getRunnerSettings(testFile: string): {
+        pesterModulePath?: string;
+        workingDirectory?: string;
+        configurationPath?: string;
+    } {
+        const folder = vscode.workspace.getWorkspaceFolder(
+            vscode.Uri.file(testFile),
+        );
+        const config = vscode.workspace.getConfiguration(
+            "powershell.pester",
+            folder,
+        );
+        const resolveRelative = (value: string): string => {
+            if (folder === undefined || path.isAbsolute(value)) {
+                return value;
+            }
+            return path.join(folder.uri.fsPath, value);
+        };
+        const out: {
+            pesterModulePath?: string;
+            workingDirectory?: string;
+            configurationPath?: string;
+        } = {};
+        const modulePath = config.get<string>("pesterModulePath", "");
+        if (modulePath !== "") {
+            out.pesterModulePath = resolveRelative(modulePath);
+        }
+        const workingDirectory = config.get<string>("workingDirectory", "");
+        if (workingDirectory !== "") {
+            out.workingDirectory = resolveRelative(workingDirectory);
+        } else if (folder !== undefined) {
+            out.workingDirectory = folder.uri.fsPath;
+        }
+        const configurationPath = config.get<string>("configurationPath", "");
+        if (configurationPath !== "") {
+            out.configurationPath = resolveRelative(configurationPath);
+        }
+        return out;
+    }
+
+    /**
+     * Globs the user has configured for test-file discovery. Returns a single
+     * `{a,b,c}`-joined glob so the result can be fed straight to
+     * `findFiles` / `createFileSystemWatcher`.
+     */
+    private getTestFileGlob(): string {
+        const config = vscode.workspace.getConfiguration("powershell.pester");
+        const patterns = config.get<string[]>("testFilePath", [
+            "**/*.[tT]ests.[pP][sS]1",
+        ]);
+        const cleaned = patterns
+            .map((p) => p.trim())
+            .filter((p) => p.length > 0);
+        if (cleaned.length === 0) {
+            return "**/*.[tT]ests.[pP][sS]1";
+        }
+        if (cleaned.length === 1) {
+            return cleaned[0];
+        }
+        return `{${cleaned.join(",")}}`;
     }
 
     private async runOneFile(
@@ -537,6 +688,7 @@ export class PesterTestController implements vscode.Disposable {
         const itemsById = new Map(items.map((i) => [i.id, i]));
         const results = new Map<string, ResultEvent>();
 
+        const settings = this.getRunnerSettings(file);
         await this.invoker.run(
             {
                 paths: [file],
@@ -545,6 +697,7 @@ export class PesterTestController implements vscode.Disposable {
                     coverage && xmlPath !== undefined
                         ? { xmlOutputPath: xmlPath, sourcePaths }
                         : undefined,
+                ...settings,
             },
             (event) => {
                 this.applyEvent(event, run, itemsById, results);
@@ -735,11 +888,15 @@ export class PesterTestController implements vscode.Disposable {
      * current-tree counterpart(s).
      *
      * The item's `TestItem` instance may be stale because runner discovery
-     * just replaced its parent's children. We try exact ID lookup first
-     * (covers all static tests), then fall back to descendants of the file
-     * whose source line matches the original item's range — which captures
-     * `It -ForEach` expansions (each generated case keeps the original `It`
-     * declaration line).
+     * just replaced its parent's children with the real, ForEach-expanded
+     * tree. With the `>>`-based id scheme an AST template for `It 'greets
+     * <Name>' -ForEach (...)` has id `file>>Describe>>greets <Name>`, and
+     * each runner-discovered iteration extends that id with a sorted
+     * `>>Key=Value` suffix (`file>>Describe>>greets <Name>>>Name=Alice`).
+     *
+     * Resolution rule: any current-tree descendant whose id is the original
+     * id (exact match for plain `It`s) OR starts with `<originalId>>>`
+     * (matches every ForEach iteration of the same template).
      */
     private resolveItemAfterDiscovery(
         original: vscode.TestItem,
@@ -759,22 +916,9 @@ export class PesterTestController implements vscode.Disposable {
             return [fileItem];
         }
 
-        // Pester executes an `It -ForEach` block as a single unit — there's
-        // no per-iteration filter in `Filter.Line`. So even when the user
-        // clicks one specific case ("greets Alice"), we have to include all
-        // siblings declared on the same source line so their results bind
-        // to the right `TestItem`s. Same-line resolution does that
-        // automatically; we use it whether or not the exact id matched.
-        const exact = findDescendantById(fileItem, original.id);
-        const line = exact?.range?.start.line ?? original.range?.start.line;
-        if (line !== undefined) {
-            const sameLine = findDescendantsByLine(fileItem, line);
-            if (sameLine.length > 0) {
-                return sameLine;
-            }
-        }
-        if (exact !== undefined) {
-            return [exact];
+        const matches = findDescendantsByIdPrefix(fileItem, original.id);
+        if (matches.length > 0) {
+            return matches;
         }
         return [original];
     }
@@ -875,13 +1019,14 @@ export function collectFilterLines(
 }
 
 function extractFileFromId(id: string): string | undefined {
-    const sep = id.indexOf("::");
+    const sep = id.indexOf(ID_SEP);
     return sep === -1 ? id : id.substring(0, sep);
 }
 
 /**
  * Walk every descendant of `root` looking for an item with the given id.
- * Returns the first match (IDs are unique in our scheme).
+ * Returns the first match (IDs are unique in our scheme). Exported for
+ * unit-testing.
  */
 export function findDescendantById(
     root: vscode.TestItem,
@@ -903,23 +1048,47 @@ export function findDescendantById(
 }
 
 /**
- * Walk every descendant of `root` and collect items whose `range.start.line`
- * equals the given line number. Used to resolve a stale AST item to the
- * runtime-expanded children of a Pester `-ForEach` declaration.
+ * Walk every descendant of `root` and collect items whose id is exactly
+ * `prefix` or starts with `prefix + ID_SEP`. This is how we resolve an
+ * AST-discovered ForEach template (`file>>Describe>>greets <Name>`) to all
+ * of the runner-expanded iterations underneath it
+ * (`file>>Describe>>greets <Name>>>Name=Alice`,
+ * `file>>Describe>>greets <Name>>>Name=Bob`, …) once real runner discovery
+ * has replaced the placeholder.
  */
-export function findDescendantsByLine(
+export function findDescendantsByIdPrefix(
     root: vscode.TestItem,
-    line: number,
+    prefix: string,
 ): vscode.TestItem[] {
     const matches: vscode.TestItem[] = [];
+    const prefixWithSep = prefix + ID_SEP;
     const walk = (item: vscode.TestItem): void => {
-        if (item.range?.start.line === line) {
+        if (item.id === prefix || item.id.startsWith(prefixWithSep)) {
             matches.push(item);
+            // Don't descend into matches — their children would all share
+            // the prefix and produce redundant siblings.
+            return;
         }
         item.children.forEach(walk);
     };
     root.children.forEach(walk);
     return matches;
+}
+
+/**
+ * Cache of `vscode.TestTag` instances keyed by tag id. VS Code matches tags
+ * across `TestItem`s by their id string, so giving each tag a single
+ * shared instance keeps the controller's tag set compact.
+ */
+const tagInstances = new Map<string, vscode.TestTag>();
+
+function getTestTag(id: string): vscode.TestTag {
+    let tag = tagInstances.get(id);
+    if (tag === undefined) {
+        tag = new vscode.TestTag(id);
+        tagInstances.set(id, tag);
+    }
+    return tag;
 }
 
 /**
@@ -943,10 +1112,37 @@ export function buildItemTree(
             0,
         );
         child.canResolveChildren = node.kind === "block";
+        if (node.tags && node.tags.length > 0) {
+            child.tags = node.tags.map(getTestTag);
+        }
         buildItemTree(controller, child, node.children);
         children.push(child);
     }
     parent.children.replace(children);
+}
+
+/**
+ * Build the `TestMessage`s for a failed/errored result. When Pester
+ * produced an assertion failure of the form `Expected X, but got Y.` the
+ * runner has already pulled the two halves into `expected`/`actual`, so we
+ * surface them as a `TestMessage.diff()` for a proper side-by-side diff in
+ * the Test Results panel. Plain failures fall back to a single concatenated
+ * message.
+ */
+function buildFailureMessages(event: ResultEvent): vscode.TestMessage[] {
+    if (event.errors === undefined || event.errors.length === 0) {
+        return [new vscode.TestMessage("Test failed.")];
+    }
+    return event.errors.map((err) => {
+        const body = err.stack ? `${err.message}\n${err.stack}` : err.message;
+        if (
+            typeof err.expected === "string" &&
+            typeof err.actual === "string"
+        ) {
+            return vscode.TestMessage.diff(body, err.expected, err.actual);
+        }
+        return new vscode.TestMessage(body);
+    });
 }
 
 /**
@@ -991,15 +1187,11 @@ export function reportRunnerEvent(
             break;
         case "failed":
         case "errored": {
-            const message =
-                event.errors
-                    ?.map((e) => `${e.message}\n${e.stack}`)
-                    .join("\n\n") ?? "Test failed.";
-            const failure = new vscode.TestMessage(message);
+            const messages = buildFailureMessages(event);
             if (event.status === "failed") {
-                run.failed(target, failure, duration);
+                run.failed(target, messages, duration);
             } else {
-                run.errored(target, failure, duration);
+                run.errored(target, messages, duration);
             }
             break;
         }

@@ -7,7 +7,7 @@ import {
     buildItemTree,
     collectFilterLines,
     findDescendantById,
-    findDescendantsByLine,
+    findDescendantsByIdPrefix,
     reportRunnerEvent,
 } from "../../src/features/PesterTestController";
 import type {
@@ -32,6 +32,7 @@ interface RecordedCall {
     id: string;
     duration?: number;
     message?: string;
+    messages?: string[];
 }
 
 function makeRecordingRun(): {
@@ -50,12 +51,13 @@ function makeRecordingRun(): {
             message: vscode.TestMessage | vscode.TestMessage[],
             duration?: number,
         ): void {
-            const msg = Array.isArray(message) ? message[0] : message;
+            const list = Array.isArray(message) ? message : [message];
             calls.push({
                 method: "failed",
                 id: item.id,
                 duration,
-                message: msg.message as string,
+                message: list[0].message as string,
+                messages: list.map((m) => m.message as string),
             });
         },
         errored(
@@ -63,12 +65,13 @@ function makeRecordingRun(): {
             message: vscode.TestMessage | vscode.TestMessage[],
             duration?: number,
         ): void {
-            const msg = Array.isArray(message) ? message[0] : message;
+            const list = Array.isArray(message) ? message : [message];
             calls.push({
                 method: "errored",
                 id: item.id,
                 duration,
-                message: msg.message as string,
+                message: list[0].message as string,
+                messages: list.map((m) => m.message as string),
             });
         },
         skipped(item: vscode.TestItem): void {
@@ -126,24 +129,24 @@ describe("PesterTestController helpers", function () {
 
             const tree: PesterTestNode[] = [
                 makeNode({
-                    id: `${file}::Greeter`,
+                    id: `${file}>>Greeter`,
                     label: "Greeter",
                     kind: "block",
                     line: 2,
                     children: [
                         makeNode({
-                            id: `${file}::Greeter > when given a name`,
+                            id: `${file}>>Greeter>>when given a name`,
                             label: "when given a name",
                             kind: "block",
                             line: 3,
                             children: [
                                 makeNode({
-                                    id: `${file}::Greeter > when given a name > returns a greeting`,
+                                    id: `${file}>>Greeter>>when given a name>>returns a greeting`,
                                     label: "returns a greeting",
                                     line: 4,
                                 }),
                                 makeNode({
-                                    id: `${file}::Greeter > when given a name > fails on purpose`,
+                                    id: `${file}>>Greeter>>when given a name>>fails on purpose`,
                                     label: "fails on purpose",
                                     line: 5,
                                 }),
@@ -156,19 +159,19 @@ describe("PesterTestController helpers", function () {
             buildItemTree(controller, parent, tree);
 
             assert.strictEqual(parent.children.size, 1);
-            const describe = parent.children.get(`${file}::Greeter`);
+            const describe = parent.children.get(`${file}>>Greeter`);
             assert.ok(describe, "Describe child not added");
             assert.strictEqual(describe.canResolveChildren, true);
             assert.strictEqual(describe.range?.start.line, 1);
 
             const context = describe.children.get(
-                `${file}::Greeter > when given a name`,
+                `${file}>>Greeter>>when given a name`,
             );
             assert.ok(context, "Context child not added");
             assert.strictEqual(context.children.size, 2);
 
             const it = context.children.get(
-                `${file}::Greeter > when given a name > returns a greeting`,
+                `${file}>>Greeter>>when given a name>>returns a greeting`,
             );
             assert.ok(it, "It child not added");
             assert.strictEqual(it.canResolveChildren, false);
@@ -209,6 +212,45 @@ describe("PesterTestController helpers", function () {
                 parent.children.get("neg")?.range?.start.line,
                 0,
             );
+        });
+
+        it("applies Pester -Tag values as vscode.TestTag instances", function () {
+            const parent = controller.createTestItem("p", "p");
+            controller.items.add(parent);
+            buildItemTree(controller, parent, [
+                makeNode({
+                    id: "tagged",
+                    label: "tagged",
+                    tags: ["slow", "integration"],
+                }),
+                makeNode({ id: "untagged", label: "untagged" }),
+            ]);
+            const tagged = parent.children.get("tagged");
+            const untagged = parent.children.get("untagged");
+            if (tagged === undefined || untagged === undefined) {
+                assert.fail("expected both children to be present");
+            }
+            const tagIds = tagged.tags.map((t) => t.id).sort();
+            assert.deepStrictEqual(tagIds, ["integration", "slow"]);
+            assert.strictEqual(untagged.tags.length, 0);
+        });
+
+        it("reuses the same TestTag instance for the same tag id", function () {
+            const parent = controller.createTestItem("p", "p");
+            controller.items.add(parent);
+            buildItemTree(controller, parent, [
+                makeNode({ id: "a", label: "a", tags: ["slow"] }),
+                makeNode({ id: "b", label: "b", tags: ["slow"] }),
+            ]);
+            const a = parent.children.get("a");
+            const b = parent.children.get("b");
+            if (a === undefined || b === undefined) {
+                assert.fail("expected both children to be present");
+            }
+            const tagA = a.tags.find((t) => t.id === "slow");
+            const tagB = b.tags.find((t) => t.id === "slow");
+            assert.ok(tagA !== undefined && tagB !== undefined);
+            assert.strictEqual(tagA, tagB);
         });
     });
 
@@ -256,7 +298,7 @@ describe("PesterTestController helpers", function () {
             }
         });
 
-        it("records a failed test with a combined message", function () {
+        it("records one TestMessage per error on a failed test", function () {
             const ctx = buildContext();
             try {
                 reportRunnerEvent(
@@ -279,12 +321,53 @@ describe("PesterTestController helpers", function () {
                 );
                 assert.strictEqual(ctx.calls.length, 1);
                 assert.strictEqual(ctx.calls[0].method, "failed");
-                assert.match(
-                    ctx.calls[0].message ?? "",
-                    /Expected 1 but got 2/,
+                const msgs = ctx.calls[0].messages;
+                if (msgs === undefined) {
+                    assert.fail("expected messages to be present");
+                }
+                assert.strictEqual(msgs.length, 2);
+                assert.match(msgs[0], /Expected 1 but got 2/);
+                assert.match(msgs[0], /at line 5/);
+                assert.match(msgs[1], /And another/);
+                assert.match(msgs[1], /at line 7/);
+            } finally {
+                ctx.controller.dispose();
+            }
+        });
+
+        it("produces a TestMessage.diff when expected and actual are present", function () {
+            const ctx = buildContext();
+            try {
+                reportRunnerEvent(
+                    {
+                        type: "result",
+                        id: "t1",
+                        status: "failed",
+                        durationMs: 3,
+                        errors: [
+                            {
+                                message: "Expected 1, but got 2.",
+                                stack: "at line 5",
+                                expected: "1",
+                                actual: "2",
+                            },
+                        ],
+                    },
+                    ctx.run,
+                    ctx.itemsById,
+                    ctx.results,
                 );
-                assert.match(ctx.calls[0].message ?? "", /And another/);
-                assert.match(ctx.calls[0].message ?? "", /at line 5/);
+                assert.strictEqual(ctx.calls.length, 1);
+                assert.strictEqual(ctx.calls[0].method, "failed");
+                // We can't introspect TestMessage.expectedOutput from the
+                // recording-shim (the field exists only on real TestMessage
+                // instances created via the diff factory), but the message
+                // body itself should round-trip the human-readable text.
+                const msgs = ctx.calls[0].messages;
+                if (msgs === undefined || msgs.length === 0) {
+                    assert.fail("expected messages to be present");
+                }
+                assert.match(msgs[0], /Expected 1, but got 2/);
             } finally {
                 ctx.controller.dispose();
             }
@@ -533,19 +616,19 @@ describe("PesterTestController helpers", function () {
         function buildTree(): vscode.TestItem {
             const file = controller.createTestItem("file", "Sample.Tests.ps1");
             const describe = controller.createTestItem(
-                "file::Greeter",
+                "file>>Greeter",
                 "Greeter",
             );
             const context = controller.createTestItem(
-                "file::Greeter > with name",
+                "file>>Greeter>>with name",
                 "with name",
             );
             const it1 = controller.createTestItem(
-                "file::Greeter > with name > returns hello",
+                "file>>Greeter>>with name>>returns hello",
                 "returns hello",
             );
             const it2 = controller.createTestItem(
-                "file::Greeter > with name > is friendly",
+                "file>>Greeter>>with name>>is friendly",
                 "is friendly",
             );
             context.children.replace([it1, it2]);
@@ -559,7 +642,7 @@ describe("PesterTestController helpers", function () {
             const root = buildTree();
             const hit = findDescendantById(
                 root,
-                "file::Greeter > with name > is friendly",
+                "file>>Greeter>>with name>>is friendly",
             );
             assert.ok(hit, "expected to find the It");
             assert.strictEqual(hit.label, "is friendly");
@@ -574,13 +657,13 @@ describe("PesterTestController helpers", function () {
         it("returns undefined when no descendant matches", function () {
             const root = buildTree();
             assert.strictEqual(
-                findDescendantById(root, "file::Nope > missing"),
+                findDescendantById(root, "file>>Nope>>missing"),
                 undefined,
             );
         });
     });
 
-    describe("findDescendantsByLine", function () {
+    describe("findDescendantsByIdPrefix", function () {
         let controller: vscode.TestController;
 
         beforeEach(function () {
@@ -600,68 +683,96 @@ describe("PesterTestController helpers", function () {
             return root;
         }
 
-        function makeItem(
-            id: string,
-            zeroBasedLine: number | undefined,
-        ): vscode.TestItem {
-            const item = controller.createTestItem(id, id);
-            if (zeroBasedLine !== undefined) {
-                item.range = new vscode.Range(
-                    zeroBasedLine,
-                    0,
-                    zeroBasedLine,
-                    0,
-                );
-            }
-            return item;
+        function makeItem(id: string): vscode.TestItem {
+            return controller.createTestItem(id, id);
         }
 
-        it("returns every descendant on the requested line", function () {
-            // Simulates a Pester `It -ForEach @(...)` expansion: one declaration
-            // line, multiple runtime cases.
+        it("returns every ForEach iteration of a template by id prefix", function () {
+            // Simulates a Pester `It -ForEach @(...)` expansion: one AST
+            // template `>>greets <Name>` plus N runner-discovered iterations
+            // appended with sorted `>>Key=Value` data segments.
             const root = makeRoot();
-            const a = makeItem("greets <Name=Alice>", 4);
-            const b = makeItem("greets <Name=Bob>", 4);
-            const c = makeItem("plain", 8);
+            const a = makeItem("file>>Describe>>greets <Name>>>Name=Alice");
+            const b = makeItem("file>>Describe>>greets <Name>>>Name=Bob");
+            const c = makeItem("file>>Describe>>plain");
             root.children.replace([a, b, c]);
 
-            const hits = findDescendantsByLine(root, 4);
-            const labels = hits.map((h) => h.label).sort();
-            assert.deepStrictEqual(labels, [
-                "greets <Name=Alice>",
-                "greets <Name=Bob>",
+            const hits = findDescendantsByIdPrefix(
+                root,
+                "file>>Describe>>greets <Name>",
+            );
+            const ids = hits.map((h) => h.id).sort();
+            assert.deepStrictEqual(ids, [
+                "file>>Describe>>greets <Name>>>Name=Alice",
+                "file>>Describe>>greets <Name>>>Name=Bob",
             ]);
         });
 
-        it("descends through nested blocks", function () {
+        it("returns an exact-id match for a plain (non-ForEach) test", function () {
             const root = makeRoot();
-            const describe = makeItem("Greeter", 0);
-            const ctx = makeItem("ctx", 1);
-            const target = makeItem("inner", 7);
+            const plain = makeItem("file>>Describe>>plain");
+            const other = makeItem("file>>Describe>>other");
+            root.children.replace([plain, other]);
+
+            const hits = findDescendantsByIdPrefix(
+                root,
+                "file>>Describe>>plain",
+            );
+            assert.strictEqual(hits.length, 1);
+            assert.strictEqual(hits[0].id, "file>>Describe>>plain");
+        });
+
+        it("descends through nested blocks before matching", function () {
+            const root = makeRoot();
+            const describe = makeItem("file>>Greeter");
+            const ctx = makeItem("file>>Greeter>>ctx");
+            const target = makeItem("file>>Greeter>>ctx>>inner");
             ctx.children.replace([target]);
             describe.children.replace([ctx]);
             root.children.replace([describe]);
 
-            const hits = findDescendantsByLine(root, 7);
+            const hits = findDescendantsByIdPrefix(
+                root,
+                "file>>Greeter>>ctx>>inner",
+            );
             assert.strictEqual(hits.length, 1);
-            assert.strictEqual(hits[0].label, "inner");
+            assert.strictEqual(hits[0].id, "file>>Greeter>>ctx>>inner");
         });
 
-        it("returns an empty array when no descendant has a matching line", function () {
+        it("does not match a sibling that merely shares the prefix without the separator", function () {
+            // `It 'greets'` should NOT match the prefix `greets <Name>` —
+            // we require either an exact match or a `>>` boundary after.
             const root = makeRoot();
-            root.children.replace([makeItem("a", 4), makeItem("b", undefined)]);
-            assert.deepStrictEqual(findDescendantsByLine(root, 99), []);
+            const conflict = makeItem("file>>Describe>>greets");
+            root.children.replace([conflict]);
+
+            const hits = findDescendantsByIdPrefix(
+                root,
+                "file>>Describe>>greets <Name>",
+            );
+            assert.deepStrictEqual(hits, []);
         });
 
-        it("ignores descendants without a range", function () {
+        it("returns an empty array when nothing matches", function () {
             const root = makeRoot();
-            root.children.replace([
-                makeItem("with-range", 4),
-                makeItem("no-range", undefined),
-            ]);
-            const hits = findDescendantsByLine(root, 4);
+            root.children.replace([makeItem("file>>Describe>>a")]);
+            assert.deepStrictEqual(
+                findDescendantsByIdPrefix(root, "file>>Describe>>nope"),
+                [],
+            );
+        });
+
+        it("does not descend into a matched item", function () {
+            // A file-level run should map to one item (the file), not also
+            // every nested test which trivially shares the prefix.
+            const root = makeRoot();
+            const file = makeItem("file");
+            file.children.replace([makeItem("file>>A"), makeItem("file>>B")]);
+            root.children.replace([file]);
+
+            const hits = findDescendantsByIdPrefix(root, "file");
             assert.strictEqual(hits.length, 1);
-            assert.strictEqual(hits[0].label, "with-range");
+            assert.strictEqual(hits[0].id, "file");
         });
     });
 });

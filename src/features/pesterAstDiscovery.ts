@@ -21,13 +21,21 @@ import vscode = require("vscode");
  *
  * The IDs we produce here MUST match what `PesterRunner.ps1 -Discover` emits,
  * so that when the user clicks "Run" on an AST-discovered item the runner's
- * result events bind to the right `TestItem`. The shared scheme is:
+ * result events bind to the right `TestItem`. The shared scheme — inspired
+ * by Justin Grote's `pester/vscode-adapter` — is:
  *
- *     `${absoluteFilePath}::${chainOfNames.join(' > ')}`
+ *     `${normalisedFilePath}>>BlockName>>BlockName>>TestName`
  *
- * where each chain element is the trimmed `Name` of the Pester block / test
- * (so `Describe 'Get-Greeting'` contributes `Get-Greeting`, not `Describe 'Get-Greeting'`).
+ * where each `Name` is the trimmed, UNEXPANDED Pester block / test name
+ * (so `It 'greets <Name>' -ForEach @(...)` contributes `greets <Name>`, not
+ * `greets Alice`). At run time the runner appends sorted `>>Key=Value`
+ * segments per ForEach iteration so each instance has a unique id, and the
+ * controller resolves the original (unexpanded) AST `TestItem` to all of
+ * its iterations via id-prefix lookup.
  */
+
+/** Separator used between every segment of a Pester test id. */
+export const ID_SEP = ">>";
 
 const PESTER_BLOCK_REGEX = /^(Describe|Context|It)\b/i;
 
@@ -186,7 +194,13 @@ export function extractPesterBlocksFromSymbols(
     });
 
     const fileNormal = normaliseFilePath(file);
-    const stack: { node: PesterTestNode; range: vscode.Range }[] = [];
+    interface StackFrame {
+        node: PesterTestNode;
+        name: string;
+        chain: string[];
+        range: vscode.Range;
+    }
+    const stack: StackFrame[] = [];
     const roots: PesterTestNode[] = [];
 
     for (const sym of pesterOnly) {
@@ -200,9 +214,10 @@ export function extractPesterBlocksFromSymbols(
         ) {
             stack.pop();
         }
-        const chain = stack.map((s) => extractNameFromNodeId(s.node.id));
-        chain.push(parsed.name);
-        const id = `${fileNormal}::${chain.join(" > ")}`;
+        const parentChain =
+            stack.length > 0 ? stack[stack.length - 1].chain : [];
+        const chain = [...parentChain, parsed.name];
+        const id = buildAstId(fileNormal, chain);
         const node: PesterTestNode = {
             id,
             label: parsed.name,
@@ -217,7 +232,7 @@ export function extractPesterBlocksFromSymbols(
             stack[stack.length - 1].node.children.push(node);
         }
         if (parsed.keyword !== "It") {
-            stack.push({ node, range: sym.range });
+            stack.push({ node, name: parsed.name, chain, range: sym.range });
         }
     }
     return roots;
@@ -239,24 +254,33 @@ function collectPesterSymbols(symbols: UnifiedSymbol[]): UnifiedSymbol[] {
     return out;
 }
 
-function extractNameFromNodeId(id: string): string {
-    const sep = id.indexOf("::");
-    if (sep === -1) {
-        return id;
+/**
+ * Build a Pester test id from a normalised file path and a chain of
+ * UNEXPANDED block / test names. AST discovery only ever produces this
+ * shape; the runner adds sorted `>>Key=Value` segments per ForEach
+ * iteration after the chain.
+ */
+export function buildAstId(file: string, chain: readonly string[]): string {
+    for (const segment of chain) {
+        if (segment.includes(ID_SEP)) {
+            throw new Error(
+                `Pester test names cannot contain '${ID_SEP}' (the id separator). Offending name: '${segment}'.`,
+            );
+        }
     }
-    const chain = id.substring(sep + 2);
-    const lastSep = chain.lastIndexOf(" > ");
-    return lastSep === -1 ? chain : chain.substring(lastSep + 3);
+    return [file, ...chain].join(ID_SEP);
 }
 
 /**
- * Normalise a file path so we produce the same string PSES (uppercase drive
- * letter) and the runner (output of `Resolve-Path`) both use.
+ * Normalise a file path so we produce the same string the runner and the
+ * file-level `TestItem` (which uses `vscode.Uri.file(...).fsPath`) both use.
+ * On Windows `vscode.Uri.file('C:\\…').fsPath` returns a lowercase drive
+ * letter, so we mirror that here.
  */
 function normaliseFilePath(file: string): string {
     const resolved = path.resolve(file);
-    if (process.platform === "win32" && /^[a-z]:/.test(resolved)) {
-        return resolved.charAt(0).toUpperCase() + resolved.substring(1);
+    if (process.platform === "win32" && /^[A-Za-z]:/.test(resolved)) {
+        return resolved.charAt(0).toLowerCase() + resolved.substring(1);
     }
     return resolved;
 }
@@ -288,8 +312,11 @@ export function extractPesterBlocksFromText(
 ): PesterTestNode[] {
     interface Frame {
         node: PesterTestNode;
+        name: string;
+        chain: string[];
         brace: number;
     }
+    const fileNormal = normaliseFilePath(file);
     const roots: PesterTestNode[] = [];
     const stack: Frame[] = [];
     const lines = text.split(/\r?\n/);
@@ -327,11 +354,10 @@ export function extractPesterBlocksFromText(
                 ) {
                     stack.pop();
                 }
-                const chain = stack.map((f) =>
-                    extractNameFromNodeId(f.node.id),
-                );
-                chain.push(name);
-                const id = `${file}::${chain.join(" > ")}`;
+                const parentChain =
+                    stack.length > 0 ? stack[stack.length - 1].chain : [];
+                const chain = [...parentChain, name];
+                const id = buildAstId(fileNormal, chain);
                 // Items declared with `-ForEach` or `-TestCases` expand into
                 // N tests at runtime; surface them as blocks so the user gets
                 // a chevron and the runner can fill in the real cases.
@@ -340,7 +366,7 @@ export function extractPesterBlocksFromText(
                     id,
                     label: name,
                     kind: keyword === "It" && !hasForEach ? "test" : "block",
-                    file,
+                    file: fileNormal,
                     line: lineNo + 1,
                     children: [],
                 };
@@ -353,7 +379,7 @@ export function extractPesterBlocksFromText(
                 // counter is bumped below when we process the same line's
                 // characters. Also push `It -ForEach` so descendant blocks
                 // (rare but legal) would still be tracked.
-                stack.push({ node, brace });
+                stack.push({ node, name, chain, brace });
             }
         }
         brace += countBracesIgnoringStrings(line);
