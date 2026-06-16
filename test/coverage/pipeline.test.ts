@@ -9,7 +9,10 @@ import {
     parseJaCoCoXml,
     resolveCoverageSources,
 } from "../../src/coverage/jacoco";
-import { toFileCoverage } from "../../src/coverage/vscodeAdapter";
+import {
+    toFileCoverage,
+    type FileCoverageWithDetails,
+} from "../../src/coverage/vscodeAdapter";
 
 const fixturesDir = path.resolve(__dirname, "..", "fixtures", "coverage");
 
@@ -23,7 +26,7 @@ describe("Coverage pipeline end-to-end", function () {
         path.resolve("C:\\repo\\src\\b\\Beta.ps1"),
     ];
 
-    function pipeline(xml: string): vscode.FileCoverage[] {
+    function pipeline(xml: string): FileCoverageWithDetails[] {
         const parsed = parseJaCoCoXml(xml);
         const { resolved, unresolved } = resolveCoverageSources(
             parsed,
@@ -39,10 +42,12 @@ describe("Coverage pipeline end-to-end", function () {
         "pester-6.0.0-jacoco.xml",
     ]) {
         it(`produces FileCoverage objects from ${fixture}`, function () {
-            const coverage = pipeline(loadFixture(fixture));
-            assert.strictEqual(coverage.length, 2);
+            const items = pipeline(loadFixture(fixture));
+            assert.strictEqual(items.length, 2);
             // VS Code normalises drive-letter casing on Uri.file, so compare lowercased.
-            const uris = coverage.map((c) => c.uri.fsPath.toLowerCase()).sort();
+            const uris = items
+                .map((c) => c.coverage.uri.fsPath.toLowerCase())
+                .sort();
             const expected = candidates.map((c) => c.toLowerCase()).sort();
             assert.deepStrictEqual(uris, expected);
         });
@@ -55,10 +60,10 @@ describe("Coverage pipeline end-to-end", function () {
         // public shape: statement counts, total summary, and URI.
         const parsed = parseJaCoCoXml(loadFixture("pester-6.0.0-jacoco.xml"));
         const { resolved } = resolveCoverageSources(parsed, candidates);
-        const coverage = toFileCoverage(resolved);
+        const items = toFileCoverage(resolved);
 
         // Both files have one line each, fully covered.
-        for (const fc of coverage) {
+        for (const { coverage: fc } of items) {
             assert.strictEqual(fc.statementCoverage.total, 1);
             assert.strictEqual(fc.statementCoverage.covered, 1);
             // Branch and declaration data are not populated by Pester.
@@ -82,9 +87,21 @@ describe("Coverage pipeline end-to-end", function () {
         const parsed = parseJaCoCoXml(xml);
         const sampleAbs = path.resolve("C:\\repo\\src\\Sample.ps1");
         const { resolved } = resolveCoverageSources(parsed, [sampleAbs]);
-        const [fc] = toFileCoverage(resolved);
-        assert.ok(fc, "FileCoverage was not produced");
-        assert.strictEqual(fc.statementCoverage.total, 2);
-        assert.strictEqual(fc.statementCoverage.covered, 1);
+        const [item] = toFileCoverage(resolved);
+        assert.ok(item, "FileCoverage was not produced");
+        assert.strictEqual(item.coverage.statementCoverage.total, 2);
+        assert.strictEqual(item.coverage.statementCoverage.covered, 1);
+    });
+
+    it("returns the details array alongside each FileCoverage for loadDetailedCoverage", function () {
+        const parsed = parseJaCoCoXml(loadFixture("pester-6.0.0-jacoco.xml"));
+        const { resolved } = resolveCoverageSources(parsed, candidates);
+        const items = toFileCoverage(resolved);
+        for (const { details } of items) {
+            assert.ok(
+                Array.isArray(details) && details.length > 0,
+                "details should be a non-empty array",
+            );
+        }
     });
 });

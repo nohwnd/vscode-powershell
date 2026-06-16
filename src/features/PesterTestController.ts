@@ -52,6 +52,11 @@ export class PesterTestController implements vscode.Disposable {
     private readonly runnerDiscovered = new Set<string>();
     /** Pending debounce timers per file for `onDidChangeTextDocument`. */
     private readonly astDebounce = new Map<string, NodeJS.Timeout>();
+    /** Per-run coverage details keyed by `FileCoverage` reference for `loadDetailedCoverage`. */
+    private readonly coverageDetails = new Map<
+        vscode.FileCoverage,
+        vscode.FileCoverageDetail[]
+    >();
 
     constructor(
         private readonly invoker: IPesterRunnerInvoker,
@@ -96,9 +101,14 @@ export class PesterTestController implements vscode.Disposable {
             undefined,
             true,
         );
-        coverageProfile.loadDetailedCoverage = (): Promise<
-            vscode.FileCoverageDetail[]
-        > => Promise.resolve([]);
+        coverageProfile.loadDetailedCoverage = (
+            _testRun: vscode.TestRun,
+            fileCoverage: vscode.FileCoverage,
+            _token: vscode.CancellationToken,
+        ): Promise<vscode.FileCoverageDetail[]> => {
+            const details = this.coverageDetails.get(fileCoverage);
+            return Promise.resolve(details ?? []);
+        };
 
         // Diagnostic command: dump what `executeDocumentSymbolProvider`
         // currently returns for the active editor so we can confirm whether
@@ -467,6 +477,12 @@ export class PesterTestController implements vscode.Disposable {
         token: vscode.CancellationToken,
         coverage: boolean,
     ): Promise<void> {
+        // Clear stale coverage details from any previous run so the map
+        // doesn't grow unboundedly and `loadDetailedCoverage` always serves
+        // results from the latest run.
+        if (coverage) {
+            this.coverageDetails.clear();
+        }
         const run = this.controller.createTestRun(request);
         try {
             // Log the shape of the request so we can answer "why did this
@@ -797,7 +813,8 @@ export class PesterTestController implements vscode.Disposable {
                 `Could not resolve coverage entry ${u.packagePath}/${u.sourcefile} to any known source file.`,
             );
         }
-        for (const coverage of toFileCoverage(resolved)) {
+        for (const { coverage, details } of toFileCoverage(resolved)) {
+            this.coverageDetails.set(coverage, details);
             run.addCoverage(coverage);
         }
         try {
