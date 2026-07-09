@@ -355,6 +355,128 @@ function Get-TestId {
     return ($segments -join '>>')
 }
 
+# Guarantee the ids in a list are unique. Pester expands `-ForEach` /
+# `-TestCases` into multiple tests that can share the same unexpanded name *and*
+# whose per-iteration Data stringifies identically (e.g. `@(1)` and `1` both
+# render as `1`). Get-TestId then returns the same id for distinct iterations,
+# which VS Code rejects with "Attempted to insert a duplicate test item ID".
+# Append a stable positional `>>#<n>` discriminator to every member of a
+# colliding group, in a fixed order (identical across the -Discover and -Run
+# phases, since ForEach expansion happens during Discovery either way), so each
+# iteration gets a unique-but-reproducible id. Ids that are already unique are
+# returned unchanged, so the common case keeps its readable `Key=Value` form and
+# the TS-side prefix matching still resolves AST items to runner items.
+function Resolve-DuplicateIds {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Ids)
+    $counts = @{}
+    foreach ($id in $Ids) { $counts[$id] = 1 + [int]$counts[$id] }
+    $running = @{}
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($id in $Ids) {
+        if ([int]$counts[$id] -gt 1) {
+            $n = [int]$running[$id]
+            $running[$id] = $n + 1
+            $out.Add("$id>>#$n") | Out-Null
+        }
+        else {
+            $out.Add($id) | Out-Null
+        }
+    }
+    return , $out.ToArray()
+}
+
+# Depth-first walk (blocks before tests, matching the discovery tree order)
+# collecting every block/test and its base id. The order is deterministic and
+# identical between the -Discover and -Run invocations, so the unique ids
+# derived from it line up across both phases.
+function Get-WalkItems {
+    param(
+        [Parameter(Mandatory)]$Block,
+        [Parameter(Mandatory)][string]$File,
+        [Parameter(Mandatory)]$Items,
+        [Parameter(Mandatory)]$Bases
+    )
+    foreach ($child in @($Block.Blocks)) {
+        $Items.Add($child) | Out-Null
+        $Bases.Add((Get-TestId -File $File -Path $child.Path -Data (Get-MergedData -Item $child))) | Out-Null
+        Get-WalkItems -Block $child -File $File -Items $Items -Bases $Bases
+    }
+    foreach ($test in @($Block.Tests)) {
+        $Items.Add($test) | Out-Null
+        $Bases.Add((Get-TestId -File $File -Path $test.Path -Data (Get-MergedData -Item $test))) | Out-Null
+    }
+}
+
+# Assign a unique id to every block and test in a container, disambiguating any
+# collisions *across the whole file* (not just among direct siblings), then
+# stash it on each object as `__UniqueId`. Collisions happen for `-ForEach` /
+# `-TestCases` iterations whose data stringifies identically, and also for tests
+# nested inside parameterised blocks whose data collides — a global pass catches
+# both. Emit-Discovery and Emit-RunResults call this before walking, so the ids
+# they emit are identical and unique. The disambiguator only *appends* to the
+# base id, so the TS-side prefix matching (AST node id -> expanded runner ids)
+# keeps working.
+function Set-UniqueIds {
+    param(
+        [Parameter(Mandatory)]$Container,
+        [Parameter(Mandatory)][string]$File
+    )
+    $items = New-Object System.Collections.Generic.List[object]
+    $bases = New-Object System.Collections.Generic.List[string]
+    foreach ($block in @($Container.Blocks)) {
+        $items.Add($block) | Out-Null
+        $bases.Add((Get-TestId -File $File -Path $block.Path -Data (Get-MergedData -Item $block))) | Out-Null
+        Get-WalkItems -Block $block -File $File -Items $items -Bases $bases
+    }
+    $unique = Resolve-DuplicateIds -Ids @($bases.ToArray())
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $items[$i] | Add-Member -NotePropertyName '__UniqueId' -NotePropertyValue $unique[$i] -Force
+    }
+}
+
+# Read the id assigned by Set-UniqueIds, falling back to a fresh Get-TestId if
+# the pre-pass was skipped (defensive; every emit path calls Set-UniqueIds
+# first).
+function Get-UniqueId {
+    param(
+        [Parameter(Mandatory)]$Item,
+        [Parameter(Mandatory)][string]$File
+    )
+    if ($Item.PSObject.Properties['__UniqueId'] -and $Item.__UniqueId) {
+        return [string]$Item.__UniqueId
+    }
+    return Get-TestId -File $File -Path $Item.Path -Data (Get-MergedData -Item $Item)
+}
+
+# When Pester cannot discover a container it records the failure on the
+# container (Result = 'Failed' + ErrorRecord) instead of throwing. This happens,
+# for example, when a file calls a helper that is only defined by a repo's own
+# bootstrap and is therefore undefined when the file is discovered standalone
+# (the Pester repo's `InPesterModuleScope` is exactly this case). Surface the
+# message so the controller can explain *why* a file shows no tests instead of
+# silently rendering it empty.
+function Get-ContainerDiscoveryError {
+    param($Container)
+    if ($null -eq $Container) { return $null }
+    $failed = $Container.PSObject.Properties['Result'] -and $Container.Result -eq 'Failed'
+    $records = @()
+    if ($Container.PSObject.Properties['ErrorRecord'] -and $Container.ErrorRecord) {
+        foreach ($er in @($Container.ErrorRecord)) {
+            if ($null -eq $er) { continue }
+            $msg = if ($er.PSObject.Properties['Exception'] -and $er.Exception) {
+                [string]$er.Exception.Message
+            }
+            else {
+                [string]$er
+            }
+            if (-not [string]::IsNullOrWhiteSpace($msg)) { $records += $msg }
+        }
+    }
+    if (-not $failed -and $records.Count -eq 0) { return $null }
+    if ($records.Count -gt 0) { return ($records -join "`n") }
+    return 'Pester discovery failed for this file.'
+}
+
 # Pester normalises `$container.Item.FullName` (e.g. drive-letter casing on
 # Windows) which can drift from the path the caller passed in. The TS side
 # keys items by `vscode.Uri.fsPath`, so any drift breaks the round-trip of
@@ -510,9 +632,9 @@ function Get-BlockChildren {
 
     $children = @()
 
-    foreach ($child in $Block.Blocks) {
+    foreach ($child in @($Block.Blocks)) {
         $children += [pscustomobject]@{
-            id       = Get-TestId -File $File -Path $child.Path -Data (Get-MergedData -Item $child)
+            id       = Get-UniqueId -Item $child -File $File
             label    = Get-DisplayName -Item $child
             kind     = 'block'
             file     = $File
@@ -522,9 +644,9 @@ function Get-BlockChildren {
         }
     }
 
-    foreach ($it in $Block.Tests) {
+    foreach ($it in @($Block.Tests)) {
         $children += [pscustomobject]@{
-            id       = Get-TestId -File $File -Path $it.Path -Data (Get-MergedData -Item $it)
+            id       = Get-UniqueId -Item $it -File $File
             label    = Get-DisplayName -Item $it
             kind     = 'test'
             file     = $File
@@ -541,10 +663,11 @@ function Emit-Discovery {
     param($PesterResult, [string[]]$InputPaths)
     foreach ($container in $PesterResult.Containers) {
         $file = Resolve-OriginalPath -ContainerPath $container.Item.FullName -InputPaths $InputPaths
+        Set-UniqueIds -Container $container -File $file
         $tree = @()
-        foreach ($block in $container.Blocks) {
+        foreach ($block in @($container.Blocks)) {
             $tree += [pscustomobject]@{
-                id       = Get-TestId -File $file -Path $block.Path -Data (Get-MergedData -Item $block)
+                id       = Get-UniqueId -Item $block -File $file
                 label    = Get-DisplayName -Item $block
                 kind     = 'block'
                 file     = $file
@@ -553,7 +676,12 @@ function Emit-Discovery {
                 children = Get-BlockChildren -Block $block -File $file
             }
         }
-        Write-JsonLine @{ type = 'file'; file = $file; tests = $tree }
+        $payload = @{ type = 'file'; file = $file; tests = $tree }
+        $discoveryError = Get-ContainerDiscoveryError -Container $container
+        if ($discoveryError) {
+            $payload['error'] = $discoveryError
+        }
+        Write-JsonLine $payload
     }
 }
 
@@ -563,7 +691,7 @@ function Emit-ResultsForBlock {
         [Parameter(Mandatory)][string]$File
     )
 
-    foreach ($it in $Block.Tests) {
+    foreach ($it in @($Block.Tests)) {
         $status = switch ($it.Result) {
             'Passed'        { 'passed' }
             'Failed'        { 'failed' }
@@ -575,7 +703,7 @@ function Emit-ResultsForBlock {
 
         $payload = [ordered]@{
             type       = 'result'
-            id         = Get-TestId -File $File -Path $it.Path -Data (Get-MergedData -Item $it)
+            id         = Get-UniqueId -Item $it -File $File
             status     = $status
             durationMs = [double]$it.Duration.TotalMilliseconds
         }
@@ -627,7 +755,8 @@ function Emit-RunResults {
     param($PesterResult, [string[]]$InputPaths)
     foreach ($container in $PesterResult.Containers) {
         $file = Resolve-OriginalPath -ContainerPath $container.Item.FullName -InputPaths $InputPaths
-        foreach ($block in $container.Blocks) {
+        Set-UniqueIds -Container $container -File $file
+        foreach ($block in @($container.Blocks)) {
             Emit-ResultsForBlock -Block $block -File $file
         }
     }

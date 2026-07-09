@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 import {
     buildItemTree,
     collectFilterLines,
+    decideDiscoveryOutcome,
     findDescendantById,
     findDescendantsByIdPrefix,
     reportRunnerEvent,
@@ -820,6 +821,46 @@ describe("PesterTestController helpers", function () {
             const hits = findDescendantsByIdPrefix(root, "file");
             assert.strictEqual(hits.length, 1);
             assert.strictEqual(hits[0].id, "file");
+        });
+    });
+
+    describe("decideDiscoveryOutcome", function () {
+        it("treats a non-empty runner result as authoritative", function () {
+            const nodes = [makeNode({ id: "file>>D>>t", label: "t" })];
+            const outcome = decideDiscoveryOutcome(nodes, undefined);
+            assert.deepStrictEqual(outcome, { kind: "runner", tests: nodes });
+        });
+
+        it("prefers the runner tree even when an error is also reported", function () {
+            // A partial failure that still produced tests should keep the
+            // tests rather than being downgraded to a fallback.
+            const nodes = [makeNode({ id: "file>>D>>t", label: "t" })];
+            const outcome = decideDiscoveryOutcome(nodes, "some warning");
+            assert.strictEqual(outcome.kind, "runner");
+        });
+
+        it("falls back to the AST tree when discovery failed with an error", function () {
+            // This is the InPesterModuleScope regression: an empty result that
+            // carries a discovery error must NOT be treated as an empty file
+            // (which would wipe the eager-AST tree and permanently suppress
+            // re-discovery). It must be surfaced as an AST fallback instead.
+            const message =
+                "The term 'InPesterModuleScope' is not recognized as a name of a cmdlet, function, script file, or executable program.";
+            const outcome = decideDiscoveryOutcome([], message);
+            assert.deepStrictEqual(outcome, {
+                kind: "astFallback",
+                error: message,
+            });
+        });
+
+        it("treats an empty result with no error as a genuinely empty file", function () {
+            const outcome = decideDiscoveryOutcome([], undefined);
+            assert.strictEqual(outcome.kind, "empty");
+        });
+
+        it("treats an empty-string error as no error", function () {
+            const outcome = decideDiscoveryOutcome([], "");
+            assert.strictEqual(outcome.kind, "empty");
         });
     });
 });

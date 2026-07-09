@@ -316,6 +316,15 @@ export class PesterTestController implements vscode.Disposable {
         // doing its discovery phase. Matches the behaviour of the
         // pester/vscode-adapter extension.
         fileItem.busy = true;
+        // Collected inside the discovery callback. We inspect them after the
+        // stream completes rather than mutating tree state mid-stream, so an
+        // empty/failed result can't wipe the eager-AST tree before we've
+        // decided what to do with it. (An array — rather than a captured
+        // `let` — keeps the post-loop inspection statically analysable.)
+        const fileResults: {
+            tests: readonly PesterTestNode[];
+            error?: string;
+        }[] = [];
         try {
             const settings = this.getRunnerSettings(fileItem.id);
             await this.invoker.discover(
@@ -326,8 +335,10 @@ export class PesterTestController implements vscode.Disposable {
                         path.normalize(event.file).toLowerCase() ===
                             path.normalize(fileItem.id).toLowerCase()
                     ) {
-                        this.materialiseChildren(fileItem, event.tests);
-                        this.runnerDiscovered.add(fileItem.id);
+                        fileResults.push({
+                            tests: event.tests,
+                            error: event.error,
+                        });
                     } else if (event.type === "error") {
                         this.logger.writeWarning(
                             `Pester discovery error: ${event.message}`,
@@ -340,6 +351,72 @@ export class PesterTestController implements vscode.Disposable {
             fileItem.busy = false;
             tokenSource.dispose();
         }
+
+        const latest = fileResults.at(-1);
+        if (latest === undefined) {
+            // The runner never reported this file (cancelled, or it crashed
+            // before emitting). Leave whatever tree we already have in place.
+            return;
+        }
+
+        const discoveryError =
+            latest.error !== undefined && latest.error !== ""
+                ? latest.error
+                : undefined;
+        const outcome = decideDiscoveryOutcome(latest.tests, discoveryError);
+        switch (outcome.kind) {
+            case "runner":
+                // Runner produced a tree; treat it as authoritative — it sees
+                // the dynamic `-ForEach` cases the AST best-guess can't.
+                this.materialiseChildren(fileItem, outcome.tests);
+                this.runnerDiscovered.add(fileItem.id);
+                break;
+            case "empty":
+                // Runner succeeded but the file genuinely has no tests. Trust
+                // it and clear any AST best-guess children so we don't show
+                // ghosts.
+                this.materialiseChildren(fileItem, []);
+                this.runnerDiscovered.add(fileItem.id);
+                break;
+            case "astFallback":
+                // Pester could not discover this file at all (for example it
+                // relies on a repo bootstrap that defines a helper such as the
+                // Pester repo's own `InPesterModuleScope`, which is undefined
+                // when the file is discovered standalone). Keep the eager-AST
+                // tree visible instead of wiping it, and do NOT mark the file
+                // as runner-discovered — so the AST stays authoritative and a
+                // later fix to the user's bootstrap can still re-discover it.
+                if (fileItem.uri !== undefined) {
+                    await this.refreshFromAst(fileItem.uri);
+                }
+                break;
+        }
+
+        // Surface (or clear) the discovery error on the file item for *every*
+        // outcome, so a partial failure — some tests discovered but one block
+        // failed, e.g. only part of the file uses a missing helper — is still
+        // visible, not just the all-or-nothing fallback. VS Code renders this
+        // as the file node's load error without hiding its children.
+        fileItem.error =
+            discoveryError !== undefined
+                ? this.formatDiscoveryError(discoveryError)
+                : undefined;
+    }
+
+    /**
+     * Wrap a raw Pester discovery-error message for display as a
+     * `TestItem.error` in the Test Explorer. VS Code shows this as the file
+     * node's "loading error" and — importantly — keeps the node's children
+     * visible, so it pairs naturally with the AST/partial tree we keep around.
+     */
+    private formatDiscoveryError(message: string): vscode.MarkdownString {
+        return new vscode.MarkdownString(
+            "Pester reported an error while discovering this file, so the " +
+                "test list may be incomplete and some tests may fail to run " +
+                "on their own.\n\n```\n" +
+                message +
+                "\n```",
+        );
     }
 
     /**
@@ -1358,6 +1435,47 @@ function getTestTag(id: string): vscode.TestTag {
         tagInstances.set(id, tag);
     }
     return tag;
+}
+
+/**
+ * The three ways the controller can react to a single-file discovery result
+ * from `PesterRunner.ps1`:
+ *
+ *   - `runner`   — the runner returned a real tree; materialise it and treat
+ *                  the runner as authoritative for this file.
+ *   - `empty`    — the runner succeeded but the file genuinely has no tests;
+ *                  clear any AST best-guess children and trust the runner.
+ *   - `astFallback` — the runner *failed* to discover the file (it reported an
+ *                  error and no tests). This happens when a file relies on a
+ *                  repo bootstrap that defines a helper unavailable when the
+ *                  file is discovered standalone (the Pester repo's own
+ *                  `InPesterModuleScope` is the canonical case). We must NOT
+ *                  wipe the eager-AST tree or mark the file as
+ *                  runner-discovered; instead keep the statically-found tests
+ *                  visible and surface the error.
+ */
+export type DiscoveryOutcome =
+    | { kind: "runner"; tests: readonly PesterTestNode[] }
+    | { kind: "empty" }
+    | { kind: "astFallback"; error: string };
+
+/**
+ * Decide how to treat a file discovery result. Extracted as a pure function so
+ * the (previously buggy) "empty result wipes and suppresses the AST tree"
+ * decision is unit-testable. The key rule: an empty result that came with a
+ * discovery *error* is a failure, not an empty file — keep the AST tree.
+ */
+export function decideDiscoveryOutcome(
+    tests: readonly PesterTestNode[],
+    error: string | undefined,
+): DiscoveryOutcome {
+    if (tests.length > 0) {
+        return { kind: "runner", tests };
+    }
+    if (error !== undefined && error !== "") {
+        return { kind: "astFallback", error };
+    }
+    return { kind: "empty" };
 }
 
 /**

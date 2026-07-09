@@ -29,6 +29,16 @@ export interface FileEvent {
     type: "file";
     file: string;
     tests: PesterTestNode[];
+    /**
+     * Set when Pester failed to *discover* this container (e.g. the file
+     * calls a helper that is only defined by a repo's own bootstrap and so is
+     * undefined when the file is discovered standalone — the Pester repo's
+     * `InPesterModuleScope` is the canonical example). When present, `tests`
+     * is typically empty; the controller keeps the eager-AST tree visible and
+     * surfaces this message on the file item so the user can see *why* the
+     * runner found nothing.
+     */
+    error?: string;
 }
 export interface ResultError {
     message: string;
