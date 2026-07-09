@@ -145,7 +145,7 @@ describe("extractPesterBlockName", function () {
     it("omits the tags key when no tags are present", function () {
         const result = extractPesterBlockName("It 'plain'");
         assert.deepStrictEqual(result, { keyword: "It", name: "plain" });
-        assert.strictEqual(result?.tags, undefined);
+        assert.strictEqual(result.tags, undefined);
     });
 });
 
