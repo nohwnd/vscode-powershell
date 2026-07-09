@@ -7,9 +7,10 @@
 # script in a separate `pwsh`/`powershell.exe` process and parses the JSON it
 # emits on stdout to populate the VS Code Test Explorer (`TestController`).
 #
-# Portions of the JSON event protocol below are inspired by the `PesterInterface.ps1`
-# script in https://github.com/pester/vscode-adapter (MIT, copyright Justin Grote),
-# adapted and used here with the author's permission.
+# Portions of the JSON event protocol and test-id handling below are adapted from the
+# `PesterInterface.ps1` and `PesterTestPlugin.psm1` scripts in
+# https://github.com/pester/vscode-adapter (MIT, Copyright (c) 2022 Justin Grote),
+# used here with the author's permission.
 #
 # Operations
 # ----------
