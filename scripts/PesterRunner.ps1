@@ -762,6 +762,30 @@ function Emit-RunResults {
     }
 }
 
+function Resolve-DiscoveryBeforeContainerFile {
+    # Bridge for a Pester gap. In discovery-only mode (Run.SkipRun = $true) Pester's
+    # Invoke-Test takes an early Discover-Test path that never applies BeforeContainer -
+    # neither Run.BeforeContainer nor the repo-root Pester.BeforeContainer.ps1 convention.
+    # Files that need those helpers at discovery time - e.g. Pester's own
+    # InPesterModuleScope, which several assertion tests wrap Describe in - then fail to
+    # discover with "The term 'InPesterModuleScope' is not recognized".
+    #
+    # We reproduce Pester's zero-config repo-root convention here: return
+    # <Run.RepoRoot>/Pester.BeforeContainer.ps1 so the caller can dot-source it before
+    # discovery. RepoRoot is Pester's own default (the nearest .git), so we look exactly
+    # where Pester would. Returns $null for older Pester without RepoRoot, no repo root,
+    # or no convention file. Remove once Pester applies BeforeContainer in its SkipRun path.
+    param(
+        [Parameter(Mandatory)]$Configuration
+    )
+    $repoRoot = $null
+    try { $repoRoot = $Configuration.Run.RepoRoot.Value } catch { return $null }
+    if ([string]::IsNullOrEmpty($repoRoot)) { return $null }
+    $bcFile = Join-Path $repoRoot 'Pester.BeforeContainer.ps1'
+    if (Test-Path -LiteralPath $bcFile -PathType Leaf) { return $bcFile }
+    return $null
+}
+
 function Invoke-RunnerDiscover {
     param(
         [Parameter(Mandatory)][string[]]$InputPaths,
@@ -775,6 +799,21 @@ function Invoke-RunnerDiscover {
     # JSON. Any unexpected stream traffic still gets folded into `output`
     # events so it shows in VS Code's logs instead of corrupting the protocol.
     $cfg.Output.Verbosity = 'None'
+
+    # Dot-source the repo-root Pester.BeforeContainer.ps1 (if any) into this session
+    # before discovery, so discovery-time helpers are defined even though Pester skips
+    # BeforeContainer in SkipRun mode. Definitions typically register session-wide (the
+    # convention file uses New-Module), so they are visible when Pester discovers each
+    # container. The file must be idempotent — it may be dot-sourced repeatedly by -Serve.
+    $bcFile = Resolve-DiscoveryBeforeContainerFile -Configuration $cfg
+    if ($bcFile) {
+        try {
+            . $bcFile
+        }
+        catch {
+            Write-JsonLine @{ type = 'output'; text = "Failed to load '$bcFile' before discovery: $($_.Exception.Message)" }
+        }
+    }
 
     Write-JsonLine @{ type = 'output'; text = (Format-PesterConfig -Configuration $cfg -Phase 'Discover') }
 
