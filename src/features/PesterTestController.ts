@@ -363,7 +363,26 @@ export class PesterTestController implements vscode.Disposable {
             latest.error !== undefined && latest.error !== ""
                 ? latest.error
                 : undefined;
-        const outcome = decideDiscoveryOutcome(latest.tests, discoveryError);
+
+        const looksLikeTestFile =
+            fileItem.uri !== undefined && isPesterTestDocument(fileItem.uri);
+
+        // If the runner came back empty, re-run the AST best-guess *before* we
+        // decide, so we act on fresh information. The AST pre-fill
+        // (refreshFromAstWithRetry) usually wins the race against the runner,
+        // but not always — and without this a runner that finished first could
+        // make a real `*.Tests.ps1` file look empty. refreshFromAst is a
+        // guarded no-op once the file is marked runner-discovered, which has
+        // not happened yet.
+        if (latest.tests.length === 0 && fileItem.uri !== undefined) {
+            await this.refreshFromAst(fileItem.uri);
+        }
+        const hasStaticTests = fileItem.children.size > 0;
+
+        const outcome = decideDiscoveryOutcome(latest.tests, discoveryError, {
+            looksLikeTestFile,
+            hasStaticTests,
+        });
         switch (outcome.kind) {
             case "runner":
                 // Runner produced a tree; treat it as authoritative — it sees
@@ -379,28 +398,34 @@ export class PesterTestController implements vscode.Disposable {
                 this.runnerDiscovered.add(fileItem.id);
                 break;
             case "astFallback":
-                // Pester could not discover this file at all (for example it
+                // Discovery failed: either Pester errored (for example it
                 // relies on a repo bootstrap that defines a helper such as the
-                // Pester repo's own `InPesterModuleScope`, which is undefined
-                // when the file is discovered standalone). Keep the eager-AST
-                // tree visible instead of wiping it, and do NOT mark the file
-                // as runner-discovered — so the AST stays authoritative and a
-                // later fix to the user's bootstrap can still re-discover it.
-                if (fileItem.uri !== undefined) {
-                    await this.refreshFromAst(fileItem.uri);
-                }
+                // Pester repo's own `InPesterModuleScope`, undefined when the
+                // file is discovered standalone), or it returned nothing for a
+                // file whose `*.Tests.ps1` name says it should hold tests. The
+                // AST tree was just (re)built above; leave it in place and do
+                // NOT mark the file runner-discovered — so the AST stays
+                // authoritative and a later fix to the user's bootstrap can
+                // still re-discover it.
                 break;
         }
 
-        // Surface (or clear) the discovery error on the file item for *every*
-        // outcome, so a partial failure — some tests discovered but one block
-        // failed, e.g. only part of the file uses a missing helper — is still
-        // visible, not just the all-or-nothing fallback. VS Code renders this
-        // as the file node's load error without hiding its children.
-        fileItem.error =
-            discoveryError !== undefined
-                ? this.formatDiscoveryError(discoveryError)
-                : undefined;
+        // Surface (or clear) a discovery note on the file item.
+        //   - A real Pester error (even a *partial* one that still produced
+        //     tests — only some blocks use a missing helper) is shown verbatim,
+        //     so the user sees why a block may be missing or fail to run.
+        //   - An astFallback with no error is the `*.Tests.ps1`-looks-empty
+        //     heuristic; show a softer note that the tests are a static guess.
+        //   - Otherwise clear any stale note.
+        // VS Code renders this as the file node's load error without hiding its
+        // children.
+        if (discoveryError !== undefined) {
+            fileItem.error = this.formatDiscoveryError(discoveryError);
+        } else if (outcome.kind === "astFallback") {
+            fileItem.error = this.formatEmptyTestFileNote();
+        } else {
+            fileItem.error = undefined;
+        }
     }
 
     /**
@@ -416,6 +441,21 @@ export class PesterTestController implements vscode.Disposable {
                 "on their own.\n\n```\n" +
                 message +
                 "\n```",
+        );
+    }
+
+    /**
+     * Note shown when Pester discovered no tests in a file whose `*.Tests.ps1`
+     * name says it should contain some. We keep the statically-found tests
+     * visible (see the `astFallback` heuristic in {@link decideDiscoveryOutcome})
+     * and explain that they are a best-guess.
+     */
+    private formatEmptyTestFileNote(): vscode.MarkdownString {
+        return new vscode.MarkdownString(
+            "Pester discovered no tests here, but this file's name " +
+                "(`*.Tests.ps1`) suggests it should contain some. The tests " +
+                "shown were found by static analysis and may be incomplete, " +
+                "and some may fail to run on their own.",
         );
     }
 
@@ -1457,25 +1497,80 @@ function getTestTag(id: string): vscode.TestTag {
 export type DiscoveryOutcome =
     | { kind: "runner"; tests: readonly PesterTestNode[] }
     | { kind: "empty" }
-    | { kind: "astFallback"; error: string };
+    | { kind: "astFallback" };
+
+/**
+ * Extra signals used to disambiguate an *empty* discovery result that carried
+ * no error. See {@link decideDiscoveryOutcome}.
+ */
+export interface DiscoveryHints {
+    /** The file's name matches Pester's `*.Tests.ps1` convention. */
+    looksLikeTestFile: boolean;
+    /** Static (AST) analysis already found at least one test in the file. */
+    hasStaticTests: boolean;
+}
 
 /**
  * Decide how to treat a file discovery result. Extracted as a pure function so
  * the (previously buggy) "empty result wipes and suppresses the AST tree"
- * decision is unit-testable. The key rule: an empty result that came with a
- * discovery *error* is a failure, not an empty file — keep the AST tree.
+ * decision is unit-testable.
+ *
+ * Rules, in order:
+ *   1. Any tests from the runner win — it is authoritative (it expands the
+ *      dynamic `-ForEach` cases the AST best-guess cannot).
+ *   2. Empty *with* a discovery error is a failure, not an empty file — keep
+ *      the AST tree (the `InPesterModuleScope` regression).
+ *   3. Empty with no error, but the file is named `*.Tests.ps1` *and* static
+ *      analysis already found tests → almost certainly a silent discovery
+ *      failure rather than a truly empty file. The naming convention is a
+ *      strong hint that tests exist, so keep the AST tree instead of blanking
+ *      it.
+ *   4. Otherwise the file really is empty — trust the runner.
  */
 export function decideDiscoveryOutcome(
     tests: readonly PesterTestNode[],
     error: string | undefined,
+    hints?: DiscoveryHints,
 ): DiscoveryOutcome {
     if (tests.length > 0) {
         return { kind: "runner", tests };
     }
     if (error !== undefined && error !== "") {
-        return { kind: "astFallback", error };
+        return { kind: "astFallback" };
+    }
+    if (hints?.looksLikeTestFile === true && hints.hasStaticTests) {
+        return { kind: "astFallback" };
     }
     return { kind: "empty" };
+}
+
+/**
+ * Disambiguate duplicate ids among a set of sibling nodes.
+ *
+ * The static/AST scanner can't expand `-ForEach`/`-TestCases`, so two
+ * parameterised siblings frequently resolve to the same id. VS Code's
+ * `TestItemCollection.replace` throws "Attempted to insert a duplicate test
+ * item ID" on the first collision, which aborts the whole file's tree — the
+ * file then renders blank (fatal for `InPesterModuleScope` files, whose AST
+ * tree is the only one they ever get). Mirror the runner's
+ * `Resolve-DuplicateIds`: any id that occurs more than once gets a stable
+ * positional `>>#<n>` suffix appended to *every* occurrence (n starting at 0),
+ * so the AST ids stay aligned with the runner's scheme.
+ */
+export function resolveDuplicateNodeIds(ids: readonly string[]): string[] {
+    const counts = new Map<string, number>();
+    for (const id of ids) {
+        counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    const running = new Map<string, number>();
+    return ids.map((id) => {
+        if ((counts.get(id) ?? 0) > 1) {
+            const n = running.get(id) ?? 0;
+            running.set(id, n + 1);
+            return `${id}${ID_SEP}#${n}`;
+        }
+        return id;
+    });
 }
 
 /**
@@ -1490,8 +1585,9 @@ export function buildItemTree(
 ): void {
     const children: vscode.TestItem[] = [];
     const uri = parent.uri ?? vscode.Uri.file(parent.id);
-    for (const node of nodes) {
-        const child = controller.createTestItem(node.id, node.label, uri);
+    const ids = resolveDuplicateNodeIds(nodes.map((node) => node.id));
+    nodes.forEach((node, index) => {
+        const child = controller.createTestItem(ids[index], node.label, uri);
         child.range = new vscode.Range(
             Math.max(0, node.line - 1),
             0,
@@ -1504,7 +1600,7 @@ export function buildItemTree(
         }
         buildItemTree(controller, child, node.children);
         children.push(child);
-    }
+    });
     parent.children.replace(children);
 }
 

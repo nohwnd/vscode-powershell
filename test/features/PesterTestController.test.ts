@@ -10,6 +10,7 @@ import {
     findDescendantById,
     findDescendantsByIdPrefix,
     reportRunnerEvent,
+    resolveDuplicateNodeIds,
 } from "../../src/features/PesterTestController";
 import type {
     PesterTestNode,
@@ -252,6 +253,59 @@ describe("PesterTestController helpers", function () {
             const tagB = b.tags.find((t) => t.id === "slow");
             assert.ok(tagA !== undefined && tagB !== undefined);
             assert.strictEqual(tagA, tagB);
+        });
+
+        it("disambiguates duplicate sibling ids instead of throwing", function () {
+            const file = vscode.Uri.file("C:/repo/Sample.Tests.ps1").fsPath;
+            const parent = controller.createTestItem(file, "Sample.Tests.ps1");
+            controller.items.add(parent);
+
+            // Two `It`s with the same literal name (e.g. a `-ForEach` the
+            // static scanner can't expand, or a genuinely repeated name)
+            // resolve to the same AST id. VS Code's `TestItemCollection.replace`
+            // throws "Attempted to insert a duplicate test item ID" on the
+            // collision, which would blank the whole file; buildItemTree must
+            // disambiguate them first.
+            assert.doesNotThrow(() => {
+                buildItemTree(controller, parent, [
+                    makeNode({ id: `${file}>>Passes`, label: "Passes" }),
+                    makeNode({ id: `${file}>>Passes`, label: "Passes" }),
+                    makeNode({ id: `${file}>>Passes`, label: "Passes" }),
+                ]);
+            });
+
+            assert.strictEqual(parent.children.size, 3);
+            assert.ok(parent.children.get(`${file}>>Passes>>#0`));
+            assert.ok(parent.children.get(`${file}>>Passes>>#1`));
+            assert.ok(parent.children.get(`${file}>>Passes>>#2`));
+        });
+    });
+
+    describe("resolveDuplicateNodeIds", function () {
+        it("leaves unique ids untouched", function () {
+            assert.deepStrictEqual(resolveDuplicateNodeIds(["a", "b", "c"]), [
+                "a",
+                "b",
+                "c",
+            ]);
+        });
+
+        it("suffixes every occurrence of a duplicated id with a 0-based index", function () {
+            assert.deepStrictEqual(
+                resolveDuplicateNodeIds(["a", "a", "b", "a"]),
+                ["a>>#0", "a>>#1", "b", "a>>#2"],
+            );
+        });
+
+        it("mirrors the runner's Resolve-DuplicateIds so both paths agree", function () {
+            assert.deepStrictEqual(
+                resolveDuplicateNodeIds(["x", "y", "x", "y"]),
+                ["x>>#0", "y>>#0", "x>>#1", "y>>#1"],
+            );
+        });
+
+        it("returns an empty array for empty input", function () {
+            assert.deepStrictEqual(resolveDuplicateNodeIds([]), []);
         });
     });
 
@@ -847,10 +901,7 @@ describe("PesterTestController helpers", function () {
             const message =
                 "The term 'InPesterModuleScope' is not recognized as a name of a cmdlet, function, script file, or executable program.";
             const outcome = decideDiscoveryOutcome([], message);
-            assert.deepStrictEqual(outcome, {
-                kind: "astFallback",
-                error: message,
-            });
+            assert.deepStrictEqual(outcome, { kind: "astFallback" });
         });
 
         it("treats an empty result with no error as a genuinely empty file", function () {
@@ -861,6 +912,42 @@ describe("PesterTestController helpers", function () {
         it("treats an empty-string error as no error", function () {
             const outcome = decideDiscoveryOutcome([], "");
             assert.strictEqual(outcome.kind, "empty");
+        });
+
+        it("keeps the AST tree when a *.Tests.ps1 file discovers empty but static analysis found tests", function () {
+            // The `*.Tests.ps1` name is a strong hint that tests exist, so an
+            // empty result with no error is far more likely a silent discovery
+            // failure than a truly empty file.
+            const outcome = decideDiscoveryOutcome([], undefined, {
+                looksLikeTestFile: true,
+                hasStaticTests: true,
+            });
+            assert.deepStrictEqual(outcome, { kind: "astFallback" });
+        });
+
+        it("treats a *.Tests.ps1 file as empty when static analysis also found nothing", function () {
+            const outcome = decideDiscoveryOutcome([], undefined, {
+                looksLikeTestFile: true,
+                hasStaticTests: false,
+            });
+            assert.strictEqual(outcome.kind, "empty");
+        });
+
+        it("does not apply the filename heuristic to non-test files", function () {
+            const outcome = decideDiscoveryOutcome([], undefined, {
+                looksLikeTestFile: false,
+                hasStaticTests: true,
+            });
+            assert.strictEqual(outcome.kind, "empty");
+        });
+
+        it("prefers the runner tree over the filename heuristic", function () {
+            const nodes = [makeNode({ id: "file>>D>>t", label: "t" })];
+            const outcome = decideDiscoveryOutcome(nodes, undefined, {
+                looksLikeTestFile: true,
+                hasStaticTests: true,
+            });
+            assert.strictEqual(outcome.kind, "runner");
         });
     });
 });
