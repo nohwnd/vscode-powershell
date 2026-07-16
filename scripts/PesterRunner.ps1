@@ -129,6 +129,26 @@ function Write-JsonLine {
     }
 }
 
+# Set both PowerShell's location ($PWD) and the process-wide .NET current
+# directory. PowerShell's Set-Location only updates $PWD; it does NOT touch
+# [Environment]::CurrentDirectory. Pester resolves Run.RepoRoot (used to locate
+# Pester.BeforeContainer.ps1) from the .NET current directory, so if only $PWD
+# is changed the repo root resolves to wherever the host process happened to
+# start (e.g. C:\ for a PSES temporary console). That makes BeforeContainer look
+# for the wrong file, and repo-private helpers such as InPesterModuleScope are
+# never defined -> discovery/run of Pester's own self-tests fails. Keeping both
+# in sync makes RepoRoot resolution correct regardless of who spawned us.
+function Set-RunnerLocation {
+    param([Parameter(Mandatory)] [string] $Path)
+    Set-Location -LiteralPath $Path
+    try {
+        [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath)
+    }
+    catch {
+        [Console]::Error.WriteLine("Set-RunnerLocation: failed to set .NET cwd: $($_.Exception.Message)")
+    }
+}
+
 # Convert a ConsoleColor to an ANSI SGR escape sequence so VS Code's test-output
 # panel can render Pester's coloured Write-Host calls. Returns an empty string
 # for unknown colours so callers can safely concatenate.
@@ -930,7 +950,7 @@ if ($WorkingDirectory) {
         }
         exit 2
     }
-    Set-Location -LiteralPath $WorkingDirectory
+    Set-RunnerLocation -Path $WorkingDirectory
 }
 
 Write-JsonLine @{
@@ -990,7 +1010,7 @@ elseif ($Serve) {
             if ($cmd.PSObject.Properties['workingDirectory'] -and $cmd.workingDirectory) {
                 $wd = [string]$cmd.workingDirectory
                 if (Test-Path -LiteralPath $wd) {
-                    Set-Location -LiteralPath $wd
+                    Set-RunnerLocation -Path $wd
                 } else {
                     Write-JsonLine @{ type = 'error'; message = "workingDirectory '$wd' does not exist." }
                 }
