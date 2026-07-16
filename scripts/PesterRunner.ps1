@@ -103,8 +103,22 @@ function Write-JsonLine {
             $Payload['requestId'] = $script:CurrentRequestId
         }
     }
-    # -Depth 8 covers Describe > Context > Context > It with extra room.
-    $json = $Payload | ConvertTo-Json -Depth 8 -Compress
+    # Depth must comfortably exceed the deepest Pester nesting. A discovery
+    # tree is file > tests[] > block > children[] > block > ... > It, and each
+    # block level costs ~2 JSON levels, so the old -Depth 8 only covered ~3
+    # block levels. Deeper self-test files (Describe > Context > Context > ...)
+    # were truncated: ConvertTo-Json collapses the too-deep `children` array
+    # into a STRING and prints a "truncated ... depth" warning. The string
+    # child then crashed the extension's buildItemTree (`nodes.map is not a
+    # function`) and aborted the whole "Run all". 64 covers any realistic
+    # suite. Silence the warning so it can never leak onto the stdout JSON
+    # stream; if it somehow still fires we surface it on stderr (which the
+    # extension logs, not parses).
+    $depthWarning = $null
+    $json = $Payload | ConvertTo-Json -Depth 64 -Compress -WarningAction SilentlyContinue -WarningVariable depthWarning
+    if ($depthWarning) {
+        [Console]::Error.WriteLine("Write-JsonLine: $($depthWarning -join '; ')")
+    }
     [Console]::Out.WriteLine($json)
     if ($script:EventLogPath) {
         # Best-effort sidecar log so the TestController's Debug profile can

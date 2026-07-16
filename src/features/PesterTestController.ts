@@ -1583,10 +1583,20 @@ export function buildItemTree(
     parent: vscode.TestItem,
     nodes: readonly PesterTestNode[],
 ): void {
+    // Defensive: a malformed/truncated discovery payload can hand us a
+    // non-array here (e.g. if a deeply-nested `children` was serialized past
+    // the runner's JSON depth and collapsed into a string). Coerce to [] so a
+    // single bad file degrades to "no children shown" instead of throwing
+    // `nodes.map is not a function` and aborting the entire run. The runner
+    // now serializes deep enough that this should never trigger, but we keep
+    // the guard so discovery can never hard-crash a run.
+    const safeNodes: readonly PesterTestNode[] = Array.isArray(nodes)
+        ? nodes
+        : [];
     const children: vscode.TestItem[] = [];
     const uri = parent.uri ?? vscode.Uri.file(parent.id);
-    const ids = resolveDuplicateNodeIds(nodes.map((node) => node.id));
-    nodes.forEach((node, index) => {
+    const ids = resolveDuplicateNodeIds(safeNodes.map((node) => node.id));
+    safeNodes.forEach((node, index) => {
         const child = controller.createTestItem(ids[index], node.label, uri);
         child.range = new vscode.Range(
             Math.max(0, node.line - 1),
