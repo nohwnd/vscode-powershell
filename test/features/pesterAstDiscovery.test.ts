@@ -117,7 +117,11 @@ describe("extractPesterBlockName", function () {
             extractPesterBlockName(
                 "It 'multi-tag' -Tag 'integration', 'slow', fast",
             ),
-            { keyword: "It", name: "multi-tag", tags: ["integration", "slow", "fast"] },
+            {
+                keyword: "It",
+                name: "multi-tag",
+                tags: ["integration", "slow", "fast"],
+            },
         );
     });
 

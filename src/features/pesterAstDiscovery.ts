@@ -53,7 +53,9 @@ const PESTER_BLOCK_REGEX = /^(Describe|Context|It)\b/i;
  */
 export function extractPesterBlockName(
     symbolName: string,
-): { keyword: "Describe" | "Context" | "It"; name: string; tags?: string[] } | undefined {
+):
+    | { keyword: "Describe" | "Context" | "It"; name: string; tags?: string[] }
+    | undefined {
     const trimmed = symbolName.trim();
     const keywordMatch = /^(Describe|Context|It)\b/i.exec(trimmed);
     if (keywordMatch === null) {
@@ -82,9 +84,11 @@ export function extractPesterBlockName(
     // downstream name parser doesn't treat `-Tag` as a bareword name.
     const tagScan = scanTagParameter(rest);
     if (tagScan !== undefined) {
-        rest = (rest.substring(0, tagScan.start) +
+        rest = (
+            rest.substring(0, tagScan.start) +
             " " +
-            rest.substring(tagScan.end)).trim();
+            rest.substring(tagScan.end)
+        ).trim();
         if (rest.length === 0) {
             return undefined;
         }
@@ -95,7 +99,13 @@ export function extractPesterBlockName(
     if (nameParam !== null) {
         rest = rest.substring(nameParam[0].length);
     }
-    const result = (name: string): { keyword: "Describe" | "Context" | "It"; name: string; tags?: string[] } => {
+    const result = (
+        name: string,
+    ): {
+        keyword: "Describe" | "Context" | "It";
+        name: string;
+        tags?: string[];
+    } => {
         return tags.length > 0
             ? { keyword: normalised, name, tags }
             : { keyword: normalised, name };
@@ -150,7 +160,9 @@ export function extractTagsFromLine(line: string): string[] {
  * occupies. Callers can splice that range out before further parsing so
  * `-Tag 'slow'` doesn't bleed into the positional name argument.
  */
-function scanTagParameter(line: string): { tags: string[]; start: number; end: number } | undefined {
+function scanTagParameter(
+    line: string,
+): { tags: string[]; start: number; end: number } | undefined {
     const tagMatch = /(?:^|\s)-Tags?\b\s*/i.exec(line);
     if (tagMatch === null) {
         return undefined;
@@ -218,7 +230,11 @@ function scanTagParameter(line: string): { tags: string[]; start: number; end: n
             i++;
         }
         const value = line.substring(wordStart, i);
-        if (value.length > 0 && !value.startsWith("$") && !value.startsWith("@")) {
+        if (
+            value.length > 0 &&
+            !value.startsWith("$") &&
+            !value.startsWith("@")
+        ) {
             tags.push(value);
         }
     }

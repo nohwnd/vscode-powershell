@@ -1,45 +1,45 @@
 {
-    // Press F5 here (in THIS window) to launch a separate VS Code
-    // "Extension Development Host" running this checkout of the PowerShell
-    // extension. Close that host and press F5 again to relaunch after edits.
-    // The "compile" preLaunchTask rebuilds dist/ before each launch.
-    "version": "0.2.0",
-    "configurations": [
-        {
-            // Default dev loop. Opens the Pester E2E fixture workspace, which
-            // lives in this repo, so the Test Explorer is populated on every
-            // machine with no external checkout. The fixtures deliberately
-            // cover the awkward cases: deep nesting, -ForEach id collisions, a
-            // helper that only exists in Pester.BeforeContainer.ps1, and a file
-            // that fails discovery.
-            "name": "Launch Extension (Pester fixtures)",
-            "type": "extensionHost",
-            "request": "launch",
-            "args": [
-                "${workspaceFolder}/test/fixtures/pester-e2e",
-                "--extensionDevelopmentPath=${workspaceFolder}",
-                // Disable installed extensions so the marketplace PowerShell
-                // extension can't clash with this dev build.
-                "--disable-extensions"
-            ],
-            "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-            "preLaunchTask": "compile"
-        },
-        {
-            // Dogfooding against a real suite. Starts with no folder open so
-            // you can pick one, or add the path as the first entry in "args"
-            // below. The Pester repo's own self-tests additionally need a
-            // Pester.BeforeContainer.ps1 at its root, see handover.md
-            // section 3.
-            "name": "Launch Extension (pick a folder)",
-            "type": "extensionHost",
-            "request": "launch",
-            "args": [
-                "--extensionDevelopmentPath=${workspaceFolder}",
-                "--disable-extensions"
-            ],
-            "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-            "preLaunchTask": "compile"
-        }
-    ]
+  // Press F5 here (in THIS window) to launch a separate VS Code
+  // "Extension Development Host" running this checkout of the PowerShell
+  // extension. Close that host and press F5 again to relaunch after edits.
+  // The "compile" preLaunchTask rebuilds dist/ before each launch.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Default dev loop. Opens the Pester E2E fixture workspace, which
+      // lives in this repo, so the Test Explorer is populated on every
+      // machine with no external checkout. The fixtures deliberately
+      // cover the awkward cases: deep nesting, -ForEach id collisions, a
+      // helper that only exists in Pester.BeforeContainer.ps1, and a file
+      // that fails discovery.
+      "name": "Launch Extension (Pester fixtures)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "${workspaceFolder}/test/fixtures/pester-e2e",
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        // Disable installed extensions so the marketplace PowerShell
+        // extension can't clash with this dev build.
+        "--disable-extensions"
+      ],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "compile"
+    },
+    {
+      // Dogfooding against a real suite. Starts with no folder open so
+      // you can pick one, or add the path as the first entry in "args"
+      // below. The Pester repo's own self-tests additionally need a
+      // Pester.BeforeContainer.ps1 at its root, see handover.md
+      // section 3.
+      "name": "Launch Extension (pick a folder)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--disable-extensions"
+      ],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "compile"
+    }
+  ]
 }

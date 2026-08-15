@@ -1,12 +1,12 @@
 {
-    // The E2E tests construct their own PesterTestController through the
-    // controllerFactory seam so they can observe the tree and run outcomes.
-    // Turning the extension's own instance off avoids two controllers racing
-    // over the same workspace, and avoids a duplicate registration of the
-    // PowerShell.Pester.DebugDocumentSymbols command.
-    "powershell.pester.useTestController": false,
-    // Keep discovery to the fixtures themselves.
-    "powershell.pester.testFilePath": ["**/*.[tT]ests.[pP][sS]1"],
-    "powershell.promptToUpdatePowerShell": false,
-    "powershell.integratedConsole.showOnStartup": false
+  // The E2E tests construct their own PesterTestController through the
+  // controllerFactory seam so they can observe the tree and run outcomes.
+  // Turning the extension's own instance off avoids two controllers racing
+  // over the same workspace, and avoids a duplicate registration of the
+  // PowerShell.Pester.DebugDocumentSymbols command.
+  "powershell.pester.useTestController": false,
+  // Keep discovery to the fixtures themselves.
+  "powershell.pester.testFilePath": ["**/*.[tT]ests.[pP][sS]1"],
+  "powershell.promptToUpdatePowerShell": false,
+  "powershell.integratedConsole.showOnStartup": false
 }
