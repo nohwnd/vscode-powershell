@@ -1,0 +1,26 @@
+{
+    // Press F5 here (in THIS window) to launch a separate VS Code
+    // "Extension Development Host" running this checkout of the PowerShell
+    // extension. Close that host and press F5 again to relaunch after edits.
+    // The "compile" preLaunchTask rebuilds dist/ before each launch.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch PowerShell Extension (dev)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                // Folder the dev host opens on start. Set to the Pester repo so
+                // the Test Explorer is populated immediately. Change or remove
+                // this line to open a different workspace.
+                "q:/p/pester",
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                // Disable installed extensions so the marketplace PowerShell
+                // extension can't clash with this dev build.
+                "--disable-extensions"
+            ],
+            "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+            "preLaunchTask": "compile"
+        }
+    ]
+}

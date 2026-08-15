@@ -1,0 +1,15 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            // One-shot esbuild bundle into dist/. Runs before every F5 so the
+            // dev host always launches the latest code.
+            "label": "compile",
+            "type": "npm",
+            "script": "compile",
+            "problemMatcher": [],
+            "presentation": { "reveal": "silent", "clear": true },
+            "group": { "kind": "build", "isDefault": true }
+        }
+    ]
+}
