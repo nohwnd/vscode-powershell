@@ -923,24 +923,30 @@ export class PesterTestController implements vscode.Disposable {
             );
             return;
         }
-        const parsed = parseJaCoCoXml(xml);
-        const { resolved, unresolved } = resolveCoverageSources(
-            parsed,
-            candidateAbsolutePaths,
-        );
-        for (const u of unresolved) {
-            this.logger.writeWarning(
-                `Could not resolve coverage entry ${u.packagePath}/${u.sourcefile} to any known source file.`,
-            );
-        }
-        for (const { coverage, details } of toFileCoverage(resolved)) {
-            this.coverageDetails.set(coverage, details);
-            run.addCoverage(coverage);
-        }
+        // The report is ours from here on, so remove it even if parsing throws.
+        // Otherwise a malformed report leaves a file behind in the temp
+        // directory on every coverage run.
         try {
-            await fs.unlink(xmlPath);
-        } catch {
-            // best-effort cleanup
+            const parsed = parseJaCoCoXml(xml);
+            const { resolved, unresolved } = resolveCoverageSources(
+                parsed,
+                candidateAbsolutePaths,
+            );
+            for (const u of unresolved) {
+                this.logger.writeWarning(
+                    `Could not resolve coverage entry ${u.packagePath}/${u.sourcefile} to any known source file.`,
+                );
+            }
+            for (const { coverage, details } of toFileCoverage(resolved)) {
+                this.coverageDetails.set(coverage, details);
+                run.addCoverage(coverage);
+            }
+        } finally {
+            try {
+                await fs.unlink(xmlPath);
+            } catch {
+                // best-effort cleanup
+            }
         }
     }
 
@@ -1267,8 +1273,10 @@ export class PesterTestController implements vscode.Disposable {
 
             const session = await sessionStarted;
             if (session === undefined) {
-                // Cancelled before the session came up. Nothing was written to
-                // the event log, so there is nothing to report.
+                // Cancelled before the session came up. There is nothing
+                // useful to report, but the runner may already have written
+                // part of a log, so drop it on the way out.
+                await this.discardEventLog(eventLogPath);
                 return;
             }
 
@@ -1294,6 +1302,11 @@ export class PesterTestController implements vscode.Disposable {
             }
 
             await sessionEnded;
+        } catch (err) {
+            // startDebugging can throw or return false. Either way the sidecar
+            // is ours to clean up, since consumeEventLog will never run.
+            await this.discardEventLog(eventLogPath);
+            throw err;
         } finally {
             for (const d of runDisposables) {
                 d.dispose();
@@ -1349,11 +1362,19 @@ export class PesterTestController implements vscode.Disposable {
                 run.skipped(item);
             }
         }
+        await this.discardEventLog(logPath);
+    }
+
+    /**
+     * Remove a debug sidecar log. Best-effort: leaving a stale `.jsonl` in the
+     * temp directory is not worth surfacing to the user, but leaving one
+     * behind on *every* debug run would be.
+     */
+    private async discardEventLog(logPath: string): Promise<void> {
         try {
             await fs.unlink(logPath);
         } catch {
-            // Best-effort cleanup. Leaving a stale jsonl in %TEMP% is not
-            // worth surfacing to the user.
+            // Never existed, or already gone.
         }
     }
 }
