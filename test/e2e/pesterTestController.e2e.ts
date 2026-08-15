@@ -13,8 +13,10 @@
 // .Tests.ps1 file for what it stands for.
 
 import * as assert from "assert";
+import { existsSync } from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import { ensureEditorServicesIsConnected } from "../utils";
 import { E2EDriver, flatten, treeDepth } from "./harness";
 
 const RUNNER = path.resolve(
@@ -356,6 +358,54 @@ describe("Pester Test Explorer E2E", function () {
                     o.id.includes("survives serialization at depth 7"),
                 ),
                 "the deeply nested test never reported a result",
+            );
+        });
+    });
+
+    // The Debug profile does not stream results on stdout, because under the
+    // PSES debug adapter stdout belongs to the debug REPL. It launches a
+    // PowerShell debug session and recovers structured results from the
+    // -EventLog sidecar file afterwards. That means it needs a working
+    // PowerShellEditorServices, so it is skipped when PSES is not built.
+    describe("Debugging", function () {
+        before(async function () {
+            this.timeout(RUN_TIMEOUT);
+            if (!existsSync(path.resolve(__dirname, "..", "..", "modules"))) {
+                this.skip();
+            }
+            await ensureEditorServicesIsConnected();
+        });
+
+        it("reports results recovered from the debug event log", async function () {
+            this.timeout(RUN_TIMEOUT);
+            const file = driver.fileItem("Simple.Tests.ps1");
+            await driver.discoverFile(file);
+
+            const run = await driver.run(vscode.TestRunProfileKind.Debug, [
+                file,
+            ]);
+
+            assert.ok(
+                run.outcomes.length > 0,
+                "the debug session produced no results, so the event log side channel is broken",
+            );
+            assert.ok(
+                run.outcomes.some(
+                    (o) =>
+                        o.outcome === "passed" &&
+                        o.id.includes("adds two numbers"),
+                ),
+                `expected a passing result from the debug run, got ${JSON.stringify(
+                    run.outcomes.map((o) => `${o.outcome} ${o.id}`),
+                )}`,
+            );
+            assert.ok(
+                run.outcomes.some(
+                    (o) =>
+                        o.outcome === "failed" &&
+                        o.id.includes("fails on purpose"),
+                ),
+                "the deliberate failure did not come back from the debug run",
             );
         });
     });
