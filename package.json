@@ -119,7 +119,9 @@
     "package": "vsce package --out out/ --no-gitHubIssueLinking --follow-symlinks",
     "publish": "vsce publish",
     "pretest": "npm run compile",
-    "test": "vscode-test"
+    "test": "vscode-test --label unit",
+    "test:e2e": "vscode-test --label e2e",
+    "test:all": "vscode-test"
   },
   "prettier": {
     "endOfLine": "auto",
