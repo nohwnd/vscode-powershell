@@ -23,15 +23,35 @@ and verified. As of the last commit the tree is green: `tsc --noEmit`, `eslint`,
 and `npm run compile` all pass clean.
 
 **Not yet done / your job:**
-- Final human confirmation of "Run all" in a real Extension Development Host on a
-  deep self-test suite (the previous machine verified this synthetically end to
-  end; a live click-through is the last mile).
 - Decide whether to open the PR to `PowerShell/vscode-powershell` (previous agent
   was explicitly told **not** to open a PR — see Constraints).
+- Decide whether `handover.md` and `handover-assets/` should stay on the branch.
+  They are internal handoff notes, roughly 1500 lines, and do not belong in an
+  upstream PR.
 - Optional deferred polish (honor repo excluded tags so CI-only checks don't
   render red). See Known issues.
 
 **Do NOT open a PR or force-push without checking Section 11 (Constraints).**
+
+### Update, 2026-08-15 (macOS session)
+
+The "Run all" confirmation is done, and it is now covered by tests instead of by
+clicking. Details in Section 16.
+
+- Full real Pester suite through the runner, from a stale cwd: **2907 results,
+  2899 passed, 4 skipped, 4 failed**, no `nodes.map` crash, no depth truncation,
+  no `InPesterModuleScope` errors. The 4 failures are not ours, plain
+  `Invoke-Pester` with no runner involved reproduces exactly the same 4 (three
+  are source-vs-installed-6.1.0 drift, one is an intentionally failing fixture
+  under `tst/testProjects`).
+- New end to end suite, `npm run test:e2e`, 17 tests covering discovery, run,
+  run all, line filtered runs, coverage and the Debug profile against real
+  `pwsh` and real Pester.
+- Unit suite is now fully green (**216 passing, 6 pending, 0 failing**) once
+  PowerShellEditorServices is cloned as a sibling and built. The 10 failures the
+  previous session saw were only the missing PSES checkout.
+- Everything above was done on macOS. The branch needed one real fix to run
+  there at all, see Section 16.
 
 ---
 
@@ -451,3 +471,98 @@ Merge-base with `upstream/main`: `25a49c6`. ~7516 insertions across 23 files.
 Good luck. The hard, subtle bugs (Fix 2's `$PWD` vs `.NET` cwd, Fix 3's depth
 truncation) are done and verified — you're mostly at "confirm live + decide on
 the PR".
+
+---
+
+## 16. Test suites and the dev loop (added 2026-08-15)
+
+### Two suites
+
+| Command | What it is |
+|---|---|
+| `npm test` | Unit suite. Pure helpers with canned payloads, plus the extension-host tests that were already there. Fast. Unchanged CI behaviour. |
+| `npm run test:e2e` | End to end suite. Real `pwsh`, real installed Pester, real `PesterRunner.ps1`, real `TestController`. Nothing stubbed. |
+| `npm run test:all` | Both. |
+
+`.vscode-test.mjs` now exports two configs (`unit` and `e2e`) because the E2E
+tests need their own workspace folder. E2E files are named `*.e2e.ts` so the
+unit glob cannot pick them up, and `npm test` still runs only the unit suite so
+CI behaves exactly as before.
+
+### What the E2E suite covers
+
+`test/e2e/pesterTestController.e2e.ts`, 17 tests: file enumeration, block/test
+tree, source ranges, deep nesting, `-ForEach` id disambiguation, the
+BeforeContainer bridge, discovery-error surfacing, broken-file isolation,
+pass/fail/skip outcomes, assertion messages, durations, line filtered runs
+(single test and single block), run all, the Debug profile via the `-EventLog`
+sidecar, and coverage including `loadDetailedCoverage`.
+
+`test/e2e/harness.ts` uses the `controllerFactory` seam to keep the
+`TestController` the feature creates, and proxies `createRunProfile` and
+`createTestRun` so a test can read the tree and every outcome call. The fixture
+workspace sets `powershell.pester.useTestController: false` so the extension's
+own controller does not race the test's, and
+`test/features/PesterTestController.test.ts` covers the activation wiring the
+seam therefore bypasses.
+
+### The fixtures are the regressions
+
+`test/fixtures/pester-e2e/` is deliberately awkward. `Deep.Tests.ps1` has seven
+nested blocks (the depth-8 truncation), `ForEach.Tests.ps1` has `1`, `'1'` and
+`1.0` colliding on one id, `Helper.Tests.ps1` needs a helper that only exists in
+`Pester.BeforeContainer.ps1` at discovery time (standing in for
+`InPesterModuleScope` without needing the Pester source tree), and
+`Broken.Tests.ps1` fails discovery on purpose.
+
+Because the fixtures are in the repo, F5 works on any machine now.
+`.vscode/launch.json` opens that folder instead of the old hardcoded
+`q:/p/pester`.
+
+### Confirming the tests are real
+
+A green suite that never ran anything looks identical to a green suite that
+did. To check, put `-Depth 8` back in `Write-JsonLine` and delete
+`test/fixtures/pester-e2e/Pester.BeforeContainer.ps1`, then run
+`npm run test:e2e`. Exactly four tests should fail (the two depth ones and the
+two BeforeContainer ones) and the other ten should stay green. Put both back and
+it returns to 17 green. Worth redoing if you ever suspect the suite has gone
+hollow.
+
+### Faster loop than VS Code
+
+For runner-side work you do not need VS Code at all. Drive
+`scripts/PesterRunner.ps1` directly, spawning from a directory that is **not**
+the repo and passing the repo only via `workingDirectory`, which is what the
+extension does (the serve worker is spawned with no `cwd`). That reproduces the
+stale .NET cwd conditions faithfully and a discover/run cycle costs seconds. See
+Section 9 for the technique.
+
+### Getting PSES so the unit suite is green
+
+The 10 failures the previous session recorded were only a missing PSES
+checkout. Clone it as a sibling of this worktree and build:
+
+```powershell
+git clone https://github.com/PowerShell/PowerShellEditorServices.git ../PowerShellEditorServices
+Invoke-Build Build -Configuration Debug   # creates the modules/ symlink and builds PSES
+```
+
+After that `npm test` is 216 passing, 6 pending, 0 failing, and
+`Invoke-Build Test` (Lint + format + Build + Test, which is what CI runs) is
+green.
+
+### macOS
+
+The branch needed one real fix to run there. `@vscode/test-electron` 2.5.2
+assumes the macOS binary is `Contents/MacOS/Electron`; VS Code renamed it to the
+product name and Insiders dropped the compatibility symlink, so every test run
+died with `ENOENT` before a single test executed. Bumped to 3.1.0.
+
+Note the Azure Artifacts mirror returns 401 for tarballs it has not mirrored
+yet, and because these are `optionalDependencies` npm swallows that and leaves
+the package out of `node_modules` without failing the install. If a dependency
+seems installed per the lockfile but is missing on disk, that is why.
+
+Everything else in the branch was already portable. Discovery, run, run all,
+coverage and debug all work on macOS with no other change.
