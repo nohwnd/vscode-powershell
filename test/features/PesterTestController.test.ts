@@ -16,6 +16,7 @@ import type {
     PesterTestNode,
     ResultEvent,
 } from "../../src/features/pesterRunnerInvoker";
+import { ensureExtensionIsActivated } from "../utils";
 
 function makeNode(
     partial: Partial<PesterTestNode> & { id: string; label: string },
@@ -949,5 +950,34 @@ describe("PesterTestController helpers", function () {
             });
             assert.strictEqual(outcome.kind, "runner");
         });
+    });
+});
+
+describe("PesterTestController activation", function () {
+    // The E2E suite builds its own controller through the controllerFactory
+    // seam, so nothing there proves that activate() actually wires one up.
+    // PowerShell.Pester.DebugDocumentSymbols is registered in the controller's
+    // constructor, so its presence is a proxy for "the feature registered".
+    it("registers the controller when activated", async function () {
+        await ensureExtensionIsActivated();
+        const commands = await vscode.commands.getCommands(true);
+        assert.ok(
+            commands.includes("PowerShell.Pester.DebugDocumentSymbols"),
+            "the Pester test controller did not register on activation",
+        );
+    });
+
+    it("registers the Pester run commands", async function () {
+        await ensureExtensionIsActivated();
+        const commands = await vscode.commands.getCommands(true);
+        for (const expected of [
+            "PowerShell.RunPesterTestsFromFile",
+            "PowerShell.DebugPesterTestsFromFile",
+        ]) {
+            assert.ok(
+                commands.includes(expected),
+                `${expected} not registered`,
+            );
+        }
     });
 });
