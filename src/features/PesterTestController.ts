@@ -638,8 +638,13 @@ export class PesterTestController implements vscode.Disposable {
             const filesRunInFull = this.computeFilesRunInFull(request);
 
             const byFile = groupByFile(tests);
+            // Read through a call rather than touching the property directly:
+            // the flag flips while we are awaiting, but control flow analysis
+            // narrows it to false after the first check and then treats every
+            // later read as dead code.
+            const cancelled = (): boolean => token.isCancellationRequested;
             for (const [file, items] of byFile) {
-                if (token.isCancellationRequested) {
+                if (cancelled()) {
                     break;
                 }
                 for (const t of items) {
@@ -648,19 +653,61 @@ export class PesterTestController implements vscode.Disposable {
                 const lineFilter = filesRunInFull.has(file)
                     ? undefined
                     : collectFilterLines(items);
-                await this.runOneFile(
-                    file,
-                    items,
-                    run,
-                    token,
-                    coverage,
-                    lineFilter,
-                );
+                try {
+                    await this.runOneFile(
+                        file,
+                        items,
+                        run,
+                        token,
+                        coverage,
+                        lineFilter,
+                    );
+                } catch (err) {
+                    // One file failing (a dead worker, a PowerShell that will
+                    // not start) must not abandon the rest of the run, and the
+                    // user needs to see it on the tests rather than only in the
+                    // log. Matches what the Debug profile already does.
+                    // A cancelled run is not a failure, so say nothing.
+                    if (cancelled()) {
+                        break;
+                    }
+                    const message = (err as Error).message;
+                    this.logger.writeError(
+                        `Pester run for ${file} failed: ${message}`,
+                    );
+                    for (const item of items) {
+                        run.errored(
+                            item,
+                            new vscode.TestMessage(
+                                `Pester could not run this file: ${message}`,
+                            ),
+                        );
+                    }
+                }
             }
         } catch (err) {
+            // Reaching here means the run fell over before, or outside of, the
+            // per-file loop, typically because discovery itself failed. Ending
+            // the run without saying anything leaves every test sitting in the
+            // Test Explorer with no result and the reason buried in the log,
+            // so put the message on the items the user asked to run.
+            const message = (err as Error).message;
             this.logger.writeError(
-                `PesterTestController run failed: ${(err as Error).message}`,
+                `PesterTestController run failed: ${message}`,
             );
+            if (!token.isCancellationRequested) {
+                const affected = request.include ?? [
+                    ...this.fileItems.values(),
+                ];
+                for (const item of affected) {
+                    run.errored(
+                        item,
+                        new vscode.TestMessage(
+                            `Pester could not run these tests: ${message}`,
+                        ),
+                    );
+                }
+            }
         } finally {
             run.end();
         }

@@ -298,7 +298,15 @@ export class PersistentPesterRunnerInvoker
                 }
             });
 
+            // Kept so a worker that dies during startup can explain itself.
+            // Without this the user gets an exit code and nothing else.
+            let startupOutput = "";
+            let ready = false;
+
             stderr.on("data", (chunk: string) => {
+                if (!ready) {
+                    startupOutput = (startupOutput + chunk).slice(-2000);
+                }
                 this.logger.writeWarning(
                     `[PesterRunner serve stderr] ${chunk}`,
                 );
@@ -324,6 +332,21 @@ export class PersistentPesterRunnerInvoker
                 if (this.child === child) {
                     this.child = undefined;
                 }
+                // Nothing else settles this promise. A worker that exits
+                // before the ready handshake (PowerShell missing, runner
+                // script not found, Pester failing to import) would otherwise
+                // leave every discovery and run awaiting a start that never
+                // finishes, and the Test Explorer would hang with no error at
+                // all.
+                if (!ready) {
+                    const detail = startupOutput.trim();
+                    reject(
+                        new Error(
+                            `Pester worker exited before it was ready (code=${code}, signal=${signal}).` +
+                                (detail.length > 0 ? ` ${detail}` : ""),
+                        ),
+                    );
+                }
             });
 
             // Resolve once we see the `ready` handshake — the script emits
@@ -331,6 +354,7 @@ export class PersistentPesterRunnerInvoker
             // is alive and the next command will run quickly.
             const armReady = (event: RunnerEvent): void => {
                 if (event.type === "ready") {
+                    ready = true;
                     resolve();
                 }
             };

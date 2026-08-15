@@ -649,3 +649,47 @@ describe("Pester Test Explorer E2E", function () {
         });
     });
 });
+
+// Separate top-level suite, and it must stay separate: PesterTestController
+// registers PowerShell.Pester.DebugDocumentSymbols in its constructor, so two
+// live instances would collide on that command. Mocha runs the suite above to
+// completion first, and its `after` disposes that driver, which frees the
+// registration before this one builds its own.
+describe("Pester Test Explorer E2E, runner failures", function () {
+    let driver: E2EDriver;
+
+    before(function () {
+        // A runner script that does not exist. PowerShell exits immediately,
+        // the worker dies, and the invoker rejects, which is the same shape as
+        // a dead worker or a PowerShell that will not start.
+        driver = new E2EDriver(path.join(WORKSPACE, "NoSuchRunner.ps1"));
+    });
+
+    after(function () {
+        driver.dispose();
+    });
+
+    it("reports the failure on the tests instead of silently doing nothing", async function () {
+        this.timeout(RUN_TIMEOUT);
+        await driver.discoverFiles();
+        const file = driver.fileItem("Simple.Tests.ps1");
+
+        const run = await driver.run(vscode.TestRunProfileKind.Run, [file]);
+
+        assert.ok(
+            run.outcomes.length > 0,
+            "a run that could not start reported nothing at all, so the tests just sit there unresolved",
+        );
+        assert.ok(
+            run.outcomes.every((o) => o.outcome === "errored"),
+            `expected every item to be errored, got ${JSON.stringify(
+                run.outcomes.map((o) => o.outcome),
+            )}`,
+        );
+        assert.ok(
+            run.outcomes[0].messages.join("\n").length > 0,
+            "the errored test carries no message explaining why",
+        );
+        assert.ok(run.ended, "the run was never ended");
+    });
+});
