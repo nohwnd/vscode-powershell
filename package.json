@@ -1199,7 +1199,7 @@
             "type": "number",
             "default": 250,
             "minimum": 0,
-            "markdownDescription": "Debounce window in milliseconds before a continuous Pester run reacts to file changes. Lower values feel snappier, higher values batch noisy editors. `0` re-runs synchronously on every event."
+            "markdownDescription": "Debounce window in milliseconds before a continuous Pester run reacts to file changes. Lower values feel snappier, higher values batch noisy editors. `0` still waits for the next event loop turn, so changes that arrive together are coalesced either way."
           }
         }
       },

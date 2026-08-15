@@ -41,6 +41,9 @@ import vscode = require("vscode");
  * across the whole workspace at activation time.
  */
 export class PesterTestController implements vscode.Disposable {
+    /** Makes each debug session's `__pesterRunId` marker unique. */
+    private static debugRunCounter = 0;
+
     private readonly controller: vscode.TestController;
     private readonly disposables: vscode.Disposable[] = [];
     private readonly fileItems = new Map<string, vscode.TestItem>();
@@ -1184,6 +1187,9 @@ export class PesterTestController implements vscode.Disposable {
         const scriptPath = this.invoker.scriptPath;
         const settings = this.getRunnerSettings(file);
         const sessionName = `Pester Debug: ${path.basename(file)}`;
+        // The session name is only the basename, so it is not unique. Carry a
+        // private marker in the launch config and match sessions on that.
+        const runId = `${Date.now()}-${++PesterTestController.debugRunCounter}`;
         const args = ["-Run", "-Path", psQuote(file)];
         if (lineNumbers && lineNumbers.length > 0) {
             args.push("-LineNumber");
@@ -1212,57 +1218,86 @@ export class PesterTestController implements vscode.Disposable {
             internalConsoleOptions: "neverOpen",
             createTemporaryIntegratedConsole: true,
             cwd: settings.workingDirectory ?? path.dirname(file),
+            __pesterRunId: runId,
         };
 
         // Track the matching session so we can wait for its termination
-        // before tailing the event log. Names are unique because we include
-        // a timestamp via path.basename + the per-run sidecar path.
-        let resolvedSession: vscode.DebugSession | undefined;
-        const sessionStarted = new Promise<vscode.DebugSession>((resolve) => {
-            const sub = vscode.debug.onDidStartDebugSession((s) => {
-                if (s.name === sessionName) {
-                    sub.dispose();
-                    resolvedSession = s;
-                    resolve(s);
-                }
-            });
-            this.disposables.push(sub);
-        });
-
-        const ok = await vscode.debug.startDebugging(
-            workspaceFolder,
-            launchConfig,
-        );
-        if (!ok) {
-            throw new Error(
-                "vscode.debug.startDebugging returned false. PSES debug adapter may be unavailable.",
-            );
-        }
-
-        const session = await sessionStarted;
-        const sessionEnded = new Promise<void>((resolve) => {
-            const sub = vscode.debug.onDidTerminateDebugSession((s) => {
-                if (s.id === session.id) {
-                    sub.dispose();
-                    resolve();
-                }
-            });
-            this.disposables.push(sub);
-            if (token.isCancellationRequested && resolvedSession) {
-                void vscode.debug.stopDebugging(resolvedSession);
-            }
-        });
-
-        const cancelSub = token.onCancellationRequested(() => {
-            if (resolvedSession) {
-                void vscode.debug.stopDebugging(resolvedSession);
-            }
-        });
-
+        // before tailing the event log.
+        // Subscriptions below belong to this one debug run. Pushing them onto
+        // `this.disposables` would leave two dead entries there per run, which
+        // never get released until the whole controller goes away.
+        const runDisposables: vscode.Disposable[] = [];
         try {
+            let resolvedSession: vscode.DebugSession | undefined;
+            // Match on the marker we put in the launch config rather than on
+            // the session name: the name is only the file's basename, so two
+            // same-named test files in different folders would match each
+            // other's sessions.
+            const sessionStarted = new Promise<vscode.DebugSession | undefined>(
+                (resolve) => {
+                    runDisposables.push(
+                        vscode.debug.onDidStartDebugSession((s) => {
+                            if (s.configuration.__pesterRunId === runId) {
+                                resolvedSession = s;
+                                resolve(s);
+                            }
+                        }),
+                    );
+                    // Without this, a session that never starts (the adapter
+                    // failed to launch, or the user cancelled while it was
+                    // coming up) leaves this promise pending forever and the
+                    // test run spins with no way out.
+                    runDisposables.push(
+                        token.onCancellationRequested(() => {
+                            resolve(undefined);
+                        }),
+                    );
+                },
+            );
+
+            const ok = await vscode.debug.startDebugging(
+                workspaceFolder,
+                launchConfig,
+            );
+            if (!ok) {
+                throw new Error(
+                    "vscode.debug.startDebugging returned false. PSES debug adapter may be unavailable.",
+                );
+            }
+
+            const session = await sessionStarted;
+            if (session === undefined) {
+                // Cancelled before the session came up. Nothing was written to
+                // the event log, so there is nothing to report.
+                return;
+            }
+
+            const sessionEnded = new Promise<void>((resolve) => {
+                runDisposables.push(
+                    vscode.debug.onDidTerminateDebugSession((s) => {
+                        if (s.id === session.id) {
+                            resolve();
+                        }
+                    }),
+                );
+            });
+
+            runDisposables.push(
+                token.onCancellationRequested(() => {
+                    if (resolvedSession) {
+                        void vscode.debug.stopDebugging(resolvedSession);
+                    }
+                }),
+            );
+            if (token.isCancellationRequested) {
+                void vscode.debug.stopDebugging(session);
+            }
+
             await sessionEnded;
         } finally {
-            cancelSub.dispose();
+            for (const d of runDisposables) {
+                d.dispose();
+            }
         }
 
         await this.consumeEventLog(eventLogPath, items, run);
