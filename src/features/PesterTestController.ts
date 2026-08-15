@@ -912,6 +912,12 @@ export class PesterTestController implements vscode.Disposable {
         const results = new Map<string, ResultEvent>();
 
         const settings = this.getRunnerSettings(file);
+        // The runner reports setup failures (a bad -PesterModulePath, a
+        // working directory that is not there) as an error event and then
+        // exits, so no results arrive. Without noticing that, every test in
+        // the file would be reported as skipped, which reads as "nothing to
+        // do" rather than "this did not run".
+        const runnerErrors: string[] = [];
         await this.invoker.run(
             {
                 paths: [file],
@@ -923,13 +929,26 @@ export class PesterTestController implements vscode.Disposable {
                 ...settings,
             },
             (event) => {
+                if (event.type === "error") {
+                    runnerErrors.push(event.message);
+                }
                 this.applyEvent(event, run, itemsById, results);
             },
             token,
         );
 
         for (const item of items) {
-            if (!results.has(item.id)) {
+            if (results.has(item.id)) {
+                continue;
+            }
+            if (runnerErrors.length > 0) {
+                run.errored(
+                    item,
+                    new vscode.TestMessage(
+                        `Pester did not run this test: ${runnerErrors.join("; ")}`,
+                    ),
+                );
+            } else {
                 run.skipped(item);
             }
         }
