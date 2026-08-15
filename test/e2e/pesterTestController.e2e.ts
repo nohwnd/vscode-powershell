@@ -13,7 +13,7 @@
 // .Tests.ps1 file for what it stands for.
 
 import * as assert from "assert";
-import { existsSync } from "fs";
+import { existsSync, unlinkSync, writeFileSync } from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { ensureEditorServicesIsConnected } from "../utils";
@@ -30,6 +30,31 @@ const RUNNER = path.resolve(
 /** Discovery of six fixture files against real Pester is not instant. */
 const DISCOVER_TIMEOUT = 3 * 60 * 1000;
 const RUN_TIMEOUT = 5 * 60 * 1000;
+
+/** The fixture workspace, which is this config's workspaceFolder. */
+const WORKSPACE = path.resolve(__dirname, "..", "fixtures", "pester-e2e");
+
+/**
+ * Poll until `probe` returns something, or fail with `message`. Used for the
+ * file watcher, which is inherently asynchronous and debounced.
+ */
+async function waitFor<T>(
+    probe: () => T | undefined,
+    timeoutMs: number,
+    message: string,
+): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const value = probe();
+        if (value !== undefined) {
+            return value;
+        }
+        if (Date.now() > deadline) {
+            throw new Error(message);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+}
 
 /** `TestItem.error` is a string or a MarkdownString; normalise for asserts. */
 function errorText(error: vscode.TestItem["error"]): string {
@@ -358,6 +383,104 @@ describe("Pester Test Explorer E2E", function () {
                     o.id.includes("survives serialization at depth 7"),
                 ),
                 "the deeply nested test never reported a result",
+            );
+        });
+    });
+
+    describe("Cancellation", function () {
+        // Cancelling has no preemptive equivalent in Pester, so the persistent
+        // worker is killed and rebuilt. The bit that actually breaks is the
+        // run *after* the cancel, when the queue is rebuilt against a fresh
+        // worker.
+        it("cancels without hanging and still works afterwards", async function () {
+            this.timeout(RUN_TIMEOUT);
+
+            const cancelled = await driver.run(
+                vscode.TestRunProfileKind.Run,
+                undefined,
+                (tokenSource) => {
+                    tokenSource.cancel();
+                },
+            );
+            assert.ok(cancelled.ended, "a cancelled run must still be ended");
+
+            const file = driver.fileItem("Simple.Tests.ps1");
+            await driver.discoverFile(file);
+            const after = await driver.run(vscode.TestRunProfileKind.Run, [
+                file,
+            ]);
+            assert.ok(
+                after.outcomes.some((o) => o.outcome === "passed"),
+                `the run after a cancel produced nothing, so the worker did not come back: ${JSON.stringify(
+                    after.outcomes,
+                )}`,
+            );
+        });
+    });
+
+    describe("File watching", function () {
+        const added = path.join(WORKSPACE, "Added.Tests.ps1");
+
+        afterEach(function () {
+            if (existsSync(added)) {
+                unlinkSync(added);
+            }
+        });
+
+        it("picks up a test file added to the workspace", async function () {
+            this.timeout(RUN_TIMEOUT);
+            writeFileSync(
+                added,
+                "Describe 'Added later' {\n    It 'was noticed' { $true | Should -BeTrue }\n}\n",
+                "utf8",
+            );
+
+            const item = await waitFor(
+                () => {
+                    try {
+                        return driver.fileItem("Added.Tests.ps1");
+                    } catch {
+                        return undefined;
+                    }
+                },
+                30 * 1000,
+                "the file watcher never added Added.Tests.ps1 to the tree",
+            );
+            assert.ok(item.uri?.fsPath.endsWith("Added.Tests.ps1"));
+        });
+
+        it("drops a test file removed from the workspace", async function () {
+            this.timeout(RUN_TIMEOUT);
+            writeFileSync(
+                added,
+                "Describe 'Temporary' {\n    It 'exists' { $true | Should -BeTrue }\n}\n",
+                "utf8",
+            );
+            await waitFor(
+                () => {
+                    try {
+                        return driver.fileItem("Added.Tests.ps1");
+                    } catch {
+                        return undefined;
+                    }
+                },
+                30 * 1000,
+                "the file was never added, so removal cannot be tested",
+            );
+
+            unlinkSync(added);
+
+            await waitFor(
+                () => {
+                    try {
+                        driver.fileItem("Added.Tests.ps1");
+                        return undefined;
+                    } catch {
+                        return true;
+                    }
+                },
+                30 * 1000,
+                "the file watcher never removed the deleted file from the tree",
             );
         });
     });

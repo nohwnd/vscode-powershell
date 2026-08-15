@@ -269,6 +269,12 @@ export class E2EDriver implements vscode.Disposable {
     public async run(
         kind: vscode.TestRunProfileKind,
         include: vscode.TestItem[] | undefined,
+        /**
+         * Called with the run's token source once the handler has been
+         * started, so a test can cancel mid-flight the way the Test
+         * Explorer's stop button does.
+         */
+        onStarted?: (tokenSource: vscode.CancellationTokenSource) => void,
     ): Promise<RecordedRun> {
         const handler = this.handlers.get(kind);
         if (handler === undefined) {
@@ -282,7 +288,9 @@ export class E2EDriver implements vscode.Disposable {
         );
         const tokenSource = new vscode.CancellationTokenSource();
         try {
-            await handler(request, tokenSource.token);
+            const pending = handler(request, tokenSource.token);
+            onStarted?.(tokenSource);
+            await pending;
         } finally {
             tokenSource.dispose();
         }
