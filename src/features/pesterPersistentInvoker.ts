@@ -110,13 +110,19 @@ export class PersistentPesterRunnerInvoker
         this.disposed = true;
         if (this.child?.exitCode === null) {
             // Send a clean shutdown if we can, then forcibly kill if the
-            // worker doesn't exit promptly.
+            // worker doesn't exit promptly. Check `writable` first: a second
+            // dispose, or a worker that has already closed its end, would
+            // otherwise raise ERR_STREAM_WRITE_AFTER_END asynchronously.
             try {
-                this.child.stdin?.write(
-                    JSON.stringify({ op: "shutdown", requestId: "shutdown" }) +
-                        "\n",
-                );
-                this.child.stdin?.end();
+                if (this.child.stdin?.writable === true) {
+                    this.child.stdin.write(
+                        JSON.stringify({
+                            op: "shutdown",
+                            requestId: "shutdown",
+                        }) + "\n",
+                    );
+                    this.child.stdin.end();
+                }
             } catch {
                 /* worker may already be dead */
             }
@@ -208,6 +214,11 @@ export class PersistentPesterRunnerInvoker
                 cancelSub,
             });
             try {
+                if (!stdin.writable) {
+                    throw new Error(
+                        "Pester worker stdin is closed; the worker is no longer accepting commands.",
+                    );
+                }
                 stdin.write(JSON.stringify(payload) + "\n");
             } catch (err) {
                 this.pending.delete(requestId);
@@ -260,6 +271,19 @@ export class PersistentPesterRunnerInvoker
 
             stdout.setEncoding("utf8");
             stderr.setEncoding("utf8");
+
+            // A write to a pipe whose far end has gone away reports the
+            // failure asynchronously as an 'error' event, not by throwing, so
+            // the try/catch around our writes cannot see it. Without a
+            // listener here Node promotes that to an unhandled exception and
+            // takes the extension host down with EPIPE or
+            // ERR_STREAM_WRITE_AFTER_END. Log it and let the 'exit' handler
+            // fail the pending requests.
+            child.stdin.on("error", (err: Error) => {
+                this.logger.writeWarning(
+                    `[PesterRunner serve stdin] ${err.message}`,
+                );
+            });
 
             stdout.on("data", (chunk: string) => {
                 this.stdoutBuffer += chunk;
