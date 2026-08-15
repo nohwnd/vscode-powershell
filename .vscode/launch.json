@@ -28,9 +28,8 @@
     {
       // Dogfooding against a real suite. Starts with no folder open so
       // you can pick one, or add the path as the first entry in "args"
-      // below. The Pester repo's own self-tests additionally need a
-      // Pester.BeforeContainer.ps1 at its root, see handover.md
-      // section 3.
+      // below. A repo whose tests need helpers from its own bootstrap also
+      // needs a Pester.BeforeContainer.ps1 at its root, see docs/pester.md.
       "name": "Launch Extension (pick a folder)",
       "type": "extensionHost",
       "request": "launch",
