@@ -87,6 +87,14 @@ task Test Lint, Build, {
     Invoke-BuildExec { git checkout test/TestEnvironment.code-workspace }
 }
 
+# End-to-end Pester Test Explorer tests. Separate from Test because these drive
+# a real pwsh and the installed Pester, so they are slower and need Pester on
+# the machine. See docs/pester.md.
+task TestE2E Build, {
+    Write-Build DarkMagenta "Running Pester Test Explorer end-to-end tests"
+    Invoke-BuildExec { & npm run test:e2e }
+}
+
 task TestEditorServices -If (Get-EditorServicesPath) {
     Write-Build DarkMagenta "Testing PSES"
     Invoke-Build Test (Get-EditorServicesPath)

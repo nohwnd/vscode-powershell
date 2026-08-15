@@ -13,6 +13,7 @@
 // .Tests.ps1 file for what it stands for.
 
 import * as assert from "assert";
+import { execFileSync } from "child_process";
 import { existsSync, unlinkSync, writeFileSync } from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -30,6 +31,48 @@ const RUNNER = path.resolve(
 /** Discovery of six fixture files against real Pester is not instant. */
 const DISCOVER_TIMEOUT = 3 * 60 * 1000;
 const RUN_TIMEOUT = 5 * 60 * 1000;
+
+/**
+ * The Pester the runner will pick: the newest installed that is at least 5.0.
+ * Returns "0.0.0" when PowerShell or Pester is missing.
+ */
+function installedPesterVersion(): string {
+    try {
+        return execFileSync(
+            "pwsh",
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-Module Pester -ListAvailable | Where-Object { $_.Version -ge [version]'5.0' } | Sort-Object Version -Descending | Select-Object -First 1).Version.ToString()",
+            ],
+            { encoding: "utf8" },
+        ).trim();
+    } catch {
+        return "0.0.0";
+    }
+}
+
+function atLeast(version: string, minimum: string): boolean {
+    const a = version.split(".").map(Number);
+    const b = minimum.split(".").map(Number);
+    for (let i = 0; i < b.length; i++) {
+        const left = a[i] ?? 0;
+        const right = b[i] ?? 0;
+        if (left !== right) {
+            return left > right;
+        }
+    }
+    return true;
+}
+
+/**
+ * Pester.BeforeContainer.ps1 needs the BeforeContainer feature, which arrived
+ * in Pester 6.1.0. Older Pester still runs everything else, so those two tests
+ * skip rather than fail on a machine (or a CI leg) pinned to Pester 5.
+ */
+const PESTER_VERSION = installedPesterVersion();
+const HAS_BEFORE_CONTAINER = atLeast(PESTER_VERSION, "6.1.0");
 
 /** The fixture workspace, which is this config's workspaceFolder. */
 const WORKSPACE = path.resolve(__dirname, "..", "fixtures", "pester-e2e");
@@ -177,6 +220,9 @@ describe("Pester Test Explorer E2E", function () {
         // Pester.BeforeContainer.ps1 before discovery.
         it("applies Pester.BeforeContainer.ps1 during discovery", async function () {
             this.timeout(DISCOVER_TIMEOUT);
+            if (!HAS_BEFORE_CONTAINER) {
+                this.skip();
+            }
             const file = driver.fileItem("Helper.Tests.ps1");
             await driver.discoverFile(file);
 
@@ -345,6 +391,9 @@ describe("Pester Test Explorer E2E", function () {
         // phase too, not just discovery.
         it("runs tests whose cases come from BeforeContainer", async function () {
             this.timeout(RUN_TIMEOUT);
+            if (!HAS_BEFORE_CONTAINER) {
+                this.skip();
+            }
             const file = driver.fileItem("Helper.Tests.ps1");
             await driver.discoverFile(file);
 

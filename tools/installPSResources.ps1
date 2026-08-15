@@ -27,3 +27,14 @@ Install-PSResource -Verbose -TrustRepository -RequiredResource  @{
         repository = $PSRepository
     }
 }
+
+# The end-to-end Test Explorer suite needs Pester 6.1.0 or newer for the
+# BeforeContainer feature. Installed side by side with 5.7.1 rather than
+# replacing it: the runner picks the newest installed Pester that is at least
+# 5.0, and keeping 5.7.1 around leaves the older line available.
+Install-PSResource -Verbose -TrustRepository -RequiredResource @{
+    Pester = @{
+        version = "6.1.0"
+        repository = $PSRepository
+    }
+}
