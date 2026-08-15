@@ -266,6 +266,54 @@ describe("Pester Test Explorer E2E", function () {
             assert.ok(timed.length > 0, "no durations were reported");
         });
 
+        // Clicking one test in the gutter must narrow Pester down with
+        // Filter.Line rather than running the whole file and throwing the rest
+        // of the results away.
+        it("runs only the test that was selected", async function () {
+            this.timeout(RUN_TIMEOUT);
+            const file = driver.fileItem("Simple.Tests.ps1");
+            await driver.discoverFile(file);
+
+            const items = [...flatten(file).values()];
+            const one = items.find((i) => i.label === "adds two numbers");
+            assert.ok(one, "could not find the test to select");
+
+            const run = await driver.run(vscode.TestRunProfileKind.Run, [one]);
+
+            assert.deepStrictEqual(
+                run.outcomes.map((o) => o.outcome),
+                ["passed"],
+                `only the selected test should run, got ${JSON.stringify(
+                    run.outcomes.map((o) => `${o.outcome} ${o.id}`),
+                )}`,
+            );
+            assert.ok(run.outcomes[0].id.includes("adds two numbers"));
+        });
+
+        // Selecting a Context should run that block's tests and nothing from
+        // the sibling block.
+        it("runs only the block that was selected", async function () {
+            this.timeout(RUN_TIMEOUT);
+            const file = driver.fileItem("Simple.Tests.ps1");
+            await driver.discoverFile(file);
+
+            const items = [...flatten(file).values()];
+            const strings = items.find((i) => i.label === "Strings");
+            assert.ok(strings, "could not find the Strings context");
+
+            const run = await driver.run(vscode.TestRunProfileKind.Run, [
+                strings,
+            ]);
+
+            assert.ok(
+                run.outcomes.every((o) => o.id.includes("concatenates")),
+                `only the Strings block should run, got ${JSON.stringify(
+                    run.outcomes.map((o) => o.id),
+                )}`,
+            );
+            assert.ok(run.outcomes.length > 0, "the block ran nothing");
+        });
+
         // Regression: the BeforeContainer helper has to be present for the run
         // phase too, not just discovery.
         it("runs tests whose cases come from BeforeContainer", async function () {
