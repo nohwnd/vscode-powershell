@@ -143,6 +143,14 @@ export function appendCommonOptionArgs(
 /**
  * Spawns and consumes the bundled `PesterRunner.ps1` script. Tests substitute
  * this with a fake implementation that emits canned events.
+ *
+ * Note on `paths`: the controller always passes exactly one file, and the
+ * child-process implementation below relies on that. `pwsh -File` does not
+ * collect several space-separated values into an array parameter, so a second
+ * path would be treated as positional and the script would fail with "A
+ * positional parameter cannot be found". The persistent worker has no such
+ * limit, it sends the paths as a JSON array. Discover or run one file at a
+ * time, or teach {@link ChildProcessPesterRunnerInvoker} to comma-join first.
  */
 export interface IPesterRunnerInvoker {
     readonly scriptPath: string;
