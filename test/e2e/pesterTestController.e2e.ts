@@ -436,6 +436,65 @@ describe("Pester Test Explorer E2E", function () {
         });
     });
 
+    // Everything else here calls the run profile handler directly, which skips
+    // the layer VS Code itself puts in front of it. These go through VS Code's
+    // testing service the same way the Run All button in the Test Explorer
+    // does, so the profile registration and the request VS Code builds are
+    // exercised too, not just our handler.
+    describe("Driven through VS Code's own test commands", function () {
+        it("runs everything from the Run All command", async function () {
+            this.timeout(RUN_TIMEOUT);
+            await driver.discoverFiles();
+
+            const before = driver.runs.length;
+            await vscode.commands.executeCommand("testing.runAll");
+
+            // The command returns before the run finishes, so wait for a run
+            // that VS Code started on our controller to complete.
+            const finished = await waitFor(
+                () =>
+                    driver.runs
+                        .slice(before)
+                        .find((r) => r.ended && r.outcomes.length > 0),
+                2 * 60 * 1000,
+                "Run All never produced a completed test run on our controller",
+            );
+
+            assert.ok(
+                finished.outcomes.length >= 10,
+                `Run All produced only ${finished.outcomes.length} outcomes`,
+            );
+            assert.ok(
+                finished.outcomes.some(
+                    (o) =>
+                        o.outcome === "passed" &&
+                        o.id.includes("adds two numbers"),
+                ),
+                "Run All did not report the passing test",
+            );
+            assert.ok(
+                finished.outcomes.some(
+                    (o) =>
+                        o.outcome === "failed" &&
+                        o.id.includes("fails on purpose"),
+                ),
+                "Run All did not report the failing test",
+            );
+        });
+
+        it("refreshes the tree from the Refresh Tests command", async function () {
+            this.timeout(RUN_TIMEOUT);
+            await vscode.commands.executeCommand("testing.refreshTests");
+
+            const ids: string[] = [];
+            driver.controller.items.forEach((i) => ids.push(i.id));
+            assert.ok(
+                ids.length >= 6,
+                `refresh left only ${ids.length} files in the tree`,
+            );
+        });
+    });
+
     describe("Cancellation", function () {
         // Cancelling has no preemptive equivalent in Pester, so the persistent
         // worker is killed and rebuilt. The bit that actually breaks is the
