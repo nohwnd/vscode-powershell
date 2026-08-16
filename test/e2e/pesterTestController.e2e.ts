@@ -441,6 +441,110 @@ describe("Pester Test Explorer E2E", function () {
     // testing service the same way the Run All button in the Test Explorer
     // does, so the profile registration and the request VS Code builds are
     // exercised too, not just our handler.
+    // The checks a person does by hand after pressing F5: is the Testing view
+    // there, does the tree hold tests from every file, does the play button in
+    // the gutter run just that test. The vscode API cannot see the workbench
+    // chrome, so these assert the state behind each of those, and drive the
+    // same commands the buttons are bound to.
+    describe("What you would check by hand", function () {
+        it("the Testing view exists and can be revealed", async function () {
+            this.timeout(RUN_TIMEOUT);
+            // The activity bar only grows a Testing icon once a controller is
+            // registered. Focusing the view fails if it is not there.
+            await vscode.commands.executeCommand(
+                "workbench.view.testing.focus",
+            );
+        });
+
+        it("holds tests from every fixture file at once", async function () {
+            this.timeout(DISCOVER_TIMEOUT);
+            await driver.discoverFiles();
+            for (const name of [
+                "Simple.Tests.ps1",
+                "Deep.Tests.ps1",
+                "ForEach.Tests.ps1",
+                "Helper.Tests.ps1",
+                "Calculator.Tests.ps1",
+            ]) {
+                const file = driver.fileItem(name);
+                await driver.discoverFile(file);
+                assert.ok(
+                    flatten(file).size > 0,
+                    `${name} shows no tests under it in the tree`,
+                );
+            }
+            // The broken one is expected to be empty, but it has to say why
+            // rather than look like a file with no tests.
+            const broken = driver.fileItem("Broken.Tests.ps1");
+            await driver.discoverFile(broken);
+            assert.ok(broken.error !== undefined);
+        });
+
+        it("the play button in the gutter runs only that test", async function () {
+            this.timeout(RUN_TIMEOUT);
+            const file = driver.fileItem("Simple.Tests.ps1");
+            await driver.discoverFile(file);
+            const target = [...flatten(file).values()].find(
+                (i) => i.label === "adds two numbers",
+            );
+            assert.ok(target?.range, "no range, so there is no gutter icon");
+
+            // testing.runAtCursor is what the gutter play button invokes.
+            const doc = await vscode.workspace.openTextDocument(file.uri!);
+            const editor = await vscode.window.showTextDocument(doc);
+            editor.selection = new vscode.Selection(
+                target.range.start,
+                target.range.start,
+            );
+
+            const before = driver.runs.length;
+            await vscode.commands.executeCommand("testing.runAtCursor");
+            const finished = await waitFor(
+                () =>
+                    driver.runs
+                        .slice(before)
+                        .find((r) => r.ended && r.outcomes.length > 0),
+                2 * 60 * 1000,
+                "the gutter run produced no completed run",
+            );
+
+            assert.deepStrictEqual(
+                finished.outcomes.map((o) => o.outcome),
+                ["passed"],
+                `expected just the one test, got ${JSON.stringify(
+                    finished.outcomes.map((o) => `${o.outcome} ${o.id}`),
+                )}`,
+            );
+        });
+
+        it("the run-file button runs the whole file", async function () {
+            this.timeout(RUN_TIMEOUT);
+            const file = driver.fileItem("Simple.Tests.ps1");
+            await driver.discoverFile(file);
+            const doc = await vscode.workspace.openTextDocument(file.uri!);
+            await vscode.window.showTextDocument(doc);
+
+            const before = driver.runs.length;
+            await vscode.commands.executeCommand("testing.runCurrentFile");
+            const finished = await waitFor(
+                () =>
+                    driver.runs
+                        .slice(before)
+                        .find((r) => r.ended && r.outcomes.length > 0),
+                2 * 60 * 1000,
+                "running the current file produced no completed run",
+            );
+
+            assert.strictEqual(
+                finished.outcomes.length,
+                4,
+                `Simple.Tests.ps1 has 4 tests, got ${JSON.stringify(
+                    finished.outcomes.map((o) => o.outcome),
+                )}`,
+            );
+        });
+    });
+
     describe("Driven through VS Code's own test commands", function () {
         it("runs everything from the Run All command", async function () {
             this.timeout(RUN_TIMEOUT);
