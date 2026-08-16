@@ -120,8 +120,32 @@ defaults; the ones worth knowing about:
 ```powershell
 npm test          # unit suite, fast, no PowerShell involved in most of it
 npm run test:e2e  # end to end, drives real pwsh and real Pester
-npm run test:all  # both
+npm run test:all  # both of the above
+npm run test:ui   # workbench UI, drives VS Code itself through Playwright
 ```
+
+Three layers, because each one sees something the others cannot:
+
+| Layer | Runs in | Sees |
+|---|---|---|
+| `npm test` | extension host | pure helpers, canned payloads |
+| `npm run test:e2e` | extension host | real `pwsh`, real Pester, real `TestController` state |
+| `npm run test:ui` | VS Code as an Electron app | the activity bar, the tree, gutter glyphs, toasts, timings |
+
+The UI layer exists because the `vscode` API deliberately exposes no workbench
+chrome. There is no way to ask it "is the Testing icon in the activity bar" or
+"what does the tree render", and those are exactly the things a person checks
+first. `test/ui` drives VS Code through Playwright's Electron support and
+asserts on the DOM, clicking with real mouse events rather than firing
+commands, so the profile registration and hit-testing are covered too.
+
+Electron has no headless mode. On Linux, CI runs it under the Xvfb the workflow
+already starts. Elsewhere the fixture hides the window through the Electron
+main process, so it does not steal your desktop while still rendering, which
+keeps screenshots and clicking working. Set `UI_VISIBLE=1` to watch it.
+
+Screenshots land in `out/ui-screens`, and a failed CI run uploads the Playwright
+HTML report as an artifact.
 
 The end to end suite lives in `test/e2e` and runs against the fixture workspace
 in `test/fixtures/pester-e2e`. It uses its own `vscode-test` config because it

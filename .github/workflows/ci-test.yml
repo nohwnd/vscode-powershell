@@ -74,6 +74,19 @@ jobs:
         run: Invoke-Build TestE2E -Configuration Release
         working-directory: vscode-powershell
 
+      - name: Test the Pester Test Explorer through the UI
+        shell: pwsh
+        run: Invoke-Build TestUI -Configuration Release
+        working-directory: vscode-powershell
+
+      - name: Upload UI test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-test-report-${{ matrix.os }}
+          path: vscode-powershell/out/ui-report
+          if-no-files-found: ignore
+
       - name: Rename VSIX to include OS name
         if: always()
         shell: pwsh

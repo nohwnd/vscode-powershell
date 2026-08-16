@@ -95,6 +95,14 @@ task TestE2E Build, {
     Invoke-BuildExec { & npm run test:e2e }
 }
 
+# Workbench UI tests. These drive VS Code itself through Playwright and assert
+# on what is on screen, which the extension-host tests cannot see. Electron has
+# no headless mode, so on Linux this needs a display (CI starts an Xvfb).
+task TestUI Build, {
+    Write-Build DarkMagenta "Running Pester Test Explorer UI tests"
+    Invoke-BuildExec { & npm run test:ui }
+}
+
 task TestEditorServices -If (Get-EditorServicesPath) {
     Write-Build DarkMagenta "Testing PSES"
     Invoke-Build Test (Get-EditorServicesPath)
