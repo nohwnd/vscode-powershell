@@ -1,11 +1,9 @@
 {
-  // The E2E tests construct their own PesterTestController through the
-  // controllerFactory seam so they can observe the tree and run outcomes.
-  // Turning the extension's own instance off avoids two controllers racing
-  // over the same workspace, and avoids a duplicate registration of the
-  // PowerShell.Pester.DebugDocumentSymbols command.
-  "powershell.pester.useTestController": false,
-  // Keep discovery to the fixtures themselves.
+  // Deliberately does NOT turn the Test Explorer off. Pressing F5 opens this
+  // folder, so the feature has to be live here or there is nothing to look at.
+  // The end-to-end tests build a second controller alongside the extension's
+  // and only observe their own, which is why the diagnostic command
+  // registration tolerates the id already being taken.
   "powershell.pester.testFilePath": ["**/*.[tT]ests.[pP][sS]1"],
   "powershell.promptToUpdatePowerShell": false,
   "powershell.integratedConsole.showOnStartup": false

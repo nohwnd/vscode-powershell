@@ -44,6 +44,27 @@ export class PesterTestController implements vscode.Disposable {
     /** Makes each debug session's `__pesterRunId` marker unique. */
     private static debugRunCounter = 0;
 
+    /**
+     * Register a diagnostic command, tolerating the id already being taken.
+     * Returns a no-op disposable in that case. Only for commands the feature
+     * can live without, never for the ones users invoke to run tests.
+     */
+    private registerDiagnosticCommand(
+        id: string,
+        handler: (...args: unknown[]) => unknown,
+    ): vscode.Disposable {
+        try {
+            return vscode.commands.registerCommand(id, handler);
+        } catch {
+            this.logger.writeDebug(
+                `${id} is already registered, skipping the duplicate.`,
+            );
+            return new vscode.Disposable(() => {
+                /* nothing to undo */
+            });
+        }
+    }
+
     private readonly controller: vscode.TestController;
     private readonly disposables: vscode.Disposable[] = [];
     private readonly fileItems = new Map<string, vscode.TestItem>();
@@ -116,8 +137,15 @@ export class PesterTestController implements vscode.Disposable {
         // Diagnostic command: dump what `executeDocumentSymbolProvider`
         // currently returns for the active editor so we can confirm whether
         // PSES's symbol provider is actually responding.
+        //
+        // registerCommand throws when the id is already taken, which would
+        // abort the constructor and leave the workspace with no test tree at
+        // all. That is a bad trade for a diagnostic helper: a second
+        // controller in the same window (the end-to-end tests build one
+        // alongside the extension's) only needs one copy of it, and losing the
+        // command is harmless while losing the controller is not.
         this.disposables.push(
-            vscode.commands.registerCommand(
+            this.registerDiagnosticCommand(
                 "PowerShell.Pester.DebugDocumentSymbols",
                 async (): Promise<void> => {
                     const editor = vscode.window.activeTextEditor;
